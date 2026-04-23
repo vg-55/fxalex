@@ -9,9 +9,10 @@ import {
   Cpu,
   TrendingUp,
   TrendingDown,
-  ShieldCheck,
   ShieldAlert,
   BarChart2,
+  Zap,
+  Sparkles,
 } from "lucide-react";
 import { format } from "date-fns";
 import ConfidenceRing from "./ConfidenceRing";
@@ -64,6 +65,35 @@ function StatusBadge({ status }: { status: Signal["status"] }) {
   );
 }
 
+// ── Factor bar component ──────────────────────────────────────────────────────
+function FactorBar({
+  label,
+  value,
+  max,
+  color,
+}: {
+  label: string;
+  value: number;
+  max: number;
+  color: string; // tailwind bg class
+}) {
+  const pct = Math.min(100, Math.round((value / max) * 100));
+  return (
+    <div className="flex items-center gap-2">
+      <div className="w-[58px] text-[9px] text-slate-500 uppercase tracking-wide shrink-0 text-right leading-none">
+        {label}
+      </div>
+      <div className="flex-1 h-1 bg-white/[0.05] rounded-full overflow-hidden">
+        <div
+          className={`h-full rounded-full transition-all duration-500 ${color}`}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      <div className="w-6 text-[9px] font-mono text-slate-500 shrink-0">{value}</div>
+    </div>
+  );
+}
+
 export default function SignalCard({
   signal,
   isCharted,
@@ -76,6 +106,7 @@ export default function SignalCard({
   const ts = new Date(signal.timestamp);
   const decimals = pairDecimals(signal.pair);
   const isBuy = signal.type === "BUY";
+  const f = signal.factors;
 
   const cardBorder = isCharted
     ? "border-blue-500/40 shadow-[0_0_0_1px_rgba(59,130,246,0.15),0_4px_24px_rgba(59,130,246,0.08)]"
@@ -91,7 +122,7 @@ export default function SignalCard({
         ${signal.isStale ? "opacity-60" : ""}
         ${isRefreshing ? "opacity-95" : ""}`}
     >
-      {/* Colored top accent by status */}
+      {/* Status accent bar */}
       <div className={`h-0.5 rounded-t-xl ${
         signal.status === "ACTIVE" ? "bg-gradient-to-r from-blue-500 to-indigo-500" :
         signal.status === "PENDING" ? "bg-gradient-to-r from-amber-500/60 to-amber-500/20" :
@@ -99,10 +130,9 @@ export default function SignalCard({
       }`} />
 
       <div className="p-4">
-        {/* Header row */}
+        {/* ── Header ──────────────────────────────────────────────────────── */}
         <div className="flex items-start justify-between gap-2 mb-3">
           <div className="flex items-center gap-2.5 min-w-0">
-            {/* Direction icon */}
             <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${
               isBuy ? "bg-emerald-500/10" : "bg-rose-500/10"
             }`}>
@@ -139,7 +169,6 @@ export default function SignalCard({
             </div>
           </div>
 
-          {/* Right: status + confidence */}
           <div className="flex flex-col items-end gap-1.5 shrink-0">
             <StatusBadge status={signal.status} />
             <ConfidenceRing value={signal.aiConfidence} size={40} stroke={3} label="CONF" />
@@ -153,7 +182,7 @@ export default function SignalCard({
           </div>
         )}
 
-        {/* Price levels */}
+        {/* ── Price levels ─────────────────────────────────────────────────── */}
         <div className="grid grid-cols-3 gap-2 mb-3">
           <div className="bg-white/[0.03] rounded-lg p-2.5 border border-white/[0.04]">
             <div className="text-[9px] uppercase tracking-wider text-slate-600 mb-1">Entry</div>
@@ -180,7 +209,7 @@ export default function SignalCard({
           </div>
         </div>
 
-        {/* Sparkline + position */}
+        {/* ── Sparkline + sizing ───────────────────────────────────────────── */}
         <div className="flex items-center gap-3 mb-3 bg-white/[0.02] rounded-lg px-3 py-2 border border-white/[0.04]">
           <div className="flex items-center gap-2 flex-1 min-w-0">
             <BarChart2 size={12} className="text-slate-600 shrink-0" />
@@ -195,14 +224,39 @@ export default function SignalCard({
               </div>
             </div>
           ) : (
-            <div className="text-right shrink-0">
-              <div className="text-[9px] text-slate-600">Set equity</div>
-              <div className="text-[9px] text-slate-600">for sizing</div>
+            <div className="text-right shrink-0 text-[9px] text-slate-600 leading-snug">
+              Set equity<br />for sizing
             </div>
           )}
         </div>
 
-        {/* Confluence chips */}
+        {/* ── Confidence factor breakdown ──────────────────────────────────── */}
+        <div className="bg-white/[0.02] border border-white/[0.05] rounded-lg p-3 mb-3">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-[9px] text-slate-600 uppercase tracking-wider font-semibold">
+              Score breakdown
+            </span>
+            <div className="flex items-center gap-1">
+              <span className="text-[10px] font-mono font-bold text-white">{signal.aiConfidence}</span>
+              <span className="text-[9px] text-slate-600">/100</span>
+              {f.aiBoost > 0 && (
+                <span className="inline-flex items-center gap-0.5 ml-1 px-1 py-0.5 rounded text-[8px] font-bold bg-purple-500/15 text-purple-400 border border-purple-500/20">
+                  <Sparkles size={7} />+{f.aiBoost} AI
+                </span>
+              )}
+            </div>
+          </div>
+          <div className="space-y-1.5">
+            <FactorBar label="Proximity" value={f.proximity}     max={25} color={f.proximity >= 20 ? "bg-emerald-500" : f.proximity >= 10 ? "bg-amber-500" : "bg-slate-600"} />
+            <FactorBar label="EMA"       value={f.emaConfluence} max={20} color={f.emaConfluence >= 16 ? "bg-emerald-500" : f.emaConfluence >= 8 ? "bg-amber-500" : "bg-rose-500"} />
+            <FactorBar label="Rejection" value={f.rejection}     max={20} color={f.rejection >= 15 ? "bg-emerald-500" : f.rejection > 0 ? "bg-amber-500" : "bg-slate-700"} />
+            <FactorBar label="Momentum"  value={f.momentum}      max={15} color={f.momentum >= 10 ? "bg-emerald-500" : f.momentum >= 5 ? "bg-amber-500" : "bg-slate-600"} />
+            <FactorBar label="Session"   value={f.sessionQuality} max={10} color={f.sessionQuality >= 8 ? "bg-emerald-500" : f.sessionQuality >= 5 ? "bg-amber-500" : "bg-slate-600"} />
+            <FactorBar label="R:R"       value={f.rrQuality}     max={10} color={f.rrQuality >= 8 ? "bg-emerald-500" : f.rrQuality >= 4 ? "bg-amber-500" : "bg-rose-500"} />
+          </div>
+        </div>
+
+        {/* ── Context chips ────────────────────────────────────────────────── */}
         <div className="flex flex-wrap gap-1.5 mb-3">
           <Chip
             icon={signal.trend === "Bullish" ? <TrendingUp size={9} /> : <TrendingDown size={9} />}
@@ -210,32 +264,32 @@ export default function SignalCard({
             tone={signal.trend === "Bullish" ? "good" : "bad"}
           />
           <Chip
-            icon={signal.trendAligned ? <ShieldCheck size={9} /> : <ShieldAlert size={9} />}
-            label={signal.trendAligned ? "D↔4H" : "TF split"}
+            icon={signal.trendAligned ? <Zap size={9} /> : <ShieldAlert size={9} />}
+            label={signal.trendAligned ? "D↔4H aligned" : "TF split"}
             tone={signal.trendAligned ? "good" : "warn"}
-          />
-          <Chip
-            icon={signal.rejectionConfirmed ? <ShieldCheck size={9} /> : <Clock size={9} />}
-            label={signal.rejectionConfirmed ? "Rejection ✓" : "No rejection"}
-            tone={signal.rejectionConfirmed ? "good" : "neutral"}
           />
           {signal.newsBlocked && (
             <Chip icon={<ShieldAlert size={9} />} label="News risk" tone="warn" />
           )}
         </div>
 
-        {/* AOI context */}
+        {/* ── AOI ─────────────────────────────────────────────────────────── */}
         <div className="flex items-center gap-1.5 text-[10px] text-slate-600 mb-3">
           <Target size={11} className="text-slate-700 shrink-0" />
           <span className="truncate">{signal.aoi}</span>
         </div>
 
-        {/* AI commentary */}
+        {/* ── AI Desk commentary ───────────────────────────────────────────── */}
         <div className="bg-purple-500/[0.04] border border-purple-500/10 rounded-lg p-2.5">
           <div className="flex items-center justify-between mb-1.5">
             <div className="flex items-center gap-1.5">
               <Cpu size={11} className="text-purple-500" />
-              <span className="text-[9px] text-purple-400 font-semibold uppercase tracking-wider">Desk</span>
+              <span className="text-[9px] text-purple-400 font-semibold uppercase tracking-wider">
+                AI Desk
+              </span>
+              {f.aiBoost > 0 && (
+                <span className="text-[8px] text-purple-500/60">· scored +{f.aiBoost}</span>
+              )}
             </div>
             <span className="text-[9px] text-slate-600 font-mono">
               {format(ts, "HH:mm")} · {relativeTime(ts, now)}
@@ -244,7 +298,6 @@ export default function SignalCard({
           <p className="text-[11px] text-slate-400 leading-relaxed">{signal.aiInterpretation}</p>
         </div>
 
-        {/* Charting indicator */}
         {isCharted && (
           <div className="mt-2.5 text-center text-[9px] text-blue-400/60 uppercase tracking-wider font-semibold">
             Charting this pair

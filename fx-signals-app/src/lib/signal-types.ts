@@ -55,9 +55,12 @@ export type Signal = {
   aiConfidence: number;
   factors: {
     proximity: number;
-    trendAlignment: number;
+    emaConfluence: number;
+    rejection: number;
+    momentum: number;
     sessionQuality: number;
     rrQuality: number;
+    aiBoost: number;
   };
   liveEma50?: number;
   dailyEma50?: number;

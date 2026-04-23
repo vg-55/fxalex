@@ -1,6 +1,6 @@
 import { db, assertDb, schema } from "@/db/client";
 import { and, eq, lt, or, isNull, sql } from "drizzle-orm";
-import { buildSignal, generateAIInterpretation, type EngineSignal } from "./engine";
+import { buildSignal, generateAIInterpretation, generateAIConfidenceBoost, type EngineSignal } from "./engine";
 import { fetchLivePricesValidated } from "./prices";
 import { fetchCandles4h, fetchClosesDaily, type CandlePair } from "./candles";
 import { ema } from "./ema";
@@ -247,6 +247,7 @@ export async function runScanOnce(): Promise<ScanSummary> {
         trendAligned,
         rejectionConfirmed,
         newsBlocked,
+        candles: pe.candles ?? null,
       });
 
       if (quote.isStale) {
@@ -291,7 +292,20 @@ export async function runScanOnce(): Promise<ScanSummary> {
     const nowMap = new Map(engineSignals.map((s) => [s.pair, { status: s.status }]));
     const outcomesCount = await evaluateOutcomes(prev, nowMap);
 
-    const aiTexts = await Promise.all(engineSignals.map((s) => generateAIInterpretation(s)));
+    // Run AI boost + interpretation in parallel for all pairs
+    const [aiBoosts, aiTexts] = await Promise.all([
+      Promise.all(engineSignals.map((s) => generateAIConfidenceBoost(s))),
+      Promise.all(engineSignals.map((s) => generateAIInterpretation(s))),
+    ]);
+
+    // Apply AI boosts to signals
+    for (let i = 0; i < engineSignals.length; i++) {
+      const boost = aiBoosts[i];
+      if (boost > 0) {
+        engineSignals[i].factors.aiBoost = boost;
+        engineSignals[i].aiConfidence = Math.min(100, engineSignals[i].aiConfidence + boost);
+      }
+    }
 
     let transitions = 0;
     for (let i = 0; i < engineSignals.length; i++) {

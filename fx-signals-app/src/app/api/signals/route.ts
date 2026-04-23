@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getCurrentSignals } from "@/lib/scanner";
+import { pairDecimals } from "@/lib/signal-types";
 import type { SignalRow } from "@/db/schema";
 
 export const dynamic = "force-dynamic";
@@ -11,36 +12,39 @@ export async function GET() {
     const { signals, state } = await getCurrentSignals();
     return NextResponse.json(
       {
-        signals: signals.map((s: SignalRow) => ({
-          id: s.pair,
-          pair: s.pair,
-          type: s.type,
-          status: s.status,
-          price: s.price.toFixed(s.pair === "XAUUSD" ? 2 : 4),
-          sl: s.sl.toFixed(s.pair === "XAUUSD" ? 2 : 4),
-          tp: s.tp.toFixed(s.pair === "XAUUSD" ? 2 : 4),
-          rr: `1:${s.rr.toFixed(1)}`,
-          timestamp: s.updatedAt.toISOString(),
-          aoi: s.aoi,
-          timeframe: s.timeframe,
-          tvSymbol: s.tvSymbol,
-          session: s.session,
-          trend: s.trend,
-          aiConfidence: s.aiConfidence,
-          factors: s.factors,
-          aiInterpretation: s.aiInterpretation,
-          changePercent: s.changePct ?? undefined,
-          dayHigh: s.dayHigh ?? undefined,
-          dayLow: s.dayLow ?? undefined,
-          liveEma50: s.liveEma50 ?? undefined,
-          dailyEma50: s.dailyEma50 ?? undefined,
-          trendAligned: s.trendAligned,
-          atr: s.atr ?? undefined,
-          rejectionConfirmed: s.rejectionConfirmed,
-          newsBlocked: s.newsBlocked,
-          nextEvent: s.nextEvent ?? undefined,
-          isStale: s.isStale,
-        })),
+        signals: signals.map((s: SignalRow) => {
+          const d = pairDecimals(s.pair);
+          return {
+            id: s.pair,
+            pair: s.pair,
+            type: s.type,
+            status: s.status,
+            price: s.price.toFixed(d),
+            sl: s.sl.toFixed(d),
+            tp: s.tp.toFixed(d),
+            rr: `1:${s.rr.toFixed(1)}`,
+            timestamp: s.updatedAt.toISOString(),
+            aoi: s.aoi,
+            timeframe: s.timeframe,
+            tvSymbol: s.tvSymbol,
+            session: s.session,
+            trend: s.trend,
+            aiConfidence: s.aiConfidence,
+            factors: s.factors,
+            aiInterpretation: s.aiInterpretation,
+            changePercent: s.changePct ?? undefined,
+            dayHigh: s.dayHigh ?? undefined,
+            dayLow: s.dayLow ?? undefined,
+            liveEma50: s.liveEma50 ?? undefined,
+            dailyEma50: s.dailyEma50 ?? undefined,
+            trendAligned: s.trendAligned,
+            atr: s.atr ?? undefined,
+            rejectionConfirmed: s.rejectionConfirmed,
+            newsBlocked: s.newsBlocked,
+            nextEvent: s.nextEvent ?? undefined,
+            isStale: s.isStale,
+          };
+        }),
         fetchedAt: state?.lastOkAt?.toISOString() ?? null,
         activeProvider: state?.activeProvider ?? null,
       },
