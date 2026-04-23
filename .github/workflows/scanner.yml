@@ -1,0 +1,33 @@
+name: Background Scanner Cron
+
+on:
+  schedule:
+    # GitHub Actions minimum schedule is every 5 minutes
+    - cron: '*/5 * * * *'
+  workflow_dispatch: # Allows you to manually trigger it from the Actions tab
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Scanner API
+        run: |
+          if [ -z "${{ secrets.APP_URL }}" ] || [ -z "${{ secrets.CRON_SECRET }}" ]; then
+            echo "Error: APP_URL or CRON_SECRET is missing in GitHub Repository Secrets."
+            exit 1
+          fi
+          
+          echo "Pinging scanner endpoint..."
+          RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            "${{ secrets.APP_URL }}/api/cron/scan")
+            
+          echo "$RESPONSE"
+          
+          # Check if the HTTP status is 200
+          if echo "$RESPONSE" | grep -q "HTTP_STATUS:200"; then
+            echo "Scan triggered successfully."
+          else
+            echo "Scan failed."
+            exit 1
+          fi
