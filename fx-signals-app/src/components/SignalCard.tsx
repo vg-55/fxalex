@@ -247,25 +247,45 @@ export default function SignalCard({
             </div>
           </div>
           <div className="space-y-1.5">
-            <FactorBar label="Proximity" value={f.proximity}     max={25} color={f.proximity >= 20 ? "bg-emerald-500" : f.proximity >= 10 ? "bg-amber-500" : "bg-slate-600"} />
-            <FactorBar label="EMA"       value={f.emaConfluence} max={20} color={f.emaConfluence >= 16 ? "bg-emerald-500" : f.emaConfluence >= 8 ? "bg-amber-500" : "bg-rose-500"} />
-            <FactorBar label="Rejection" value={f.rejection}     max={20} color={f.rejection >= 15 ? "bg-emerald-500" : f.rejection > 0 ? "bg-amber-500" : "bg-slate-700"} />
-            <FactorBar label="Momentum"  value={f.momentum}      max={15} color={f.momentum >= 10 ? "bg-emerald-500" : f.momentum >= 5 ? "bg-amber-500" : "bg-slate-600"} />
-            <FactorBar label="Session"   value={f.sessionQuality} max={10} color={f.sessionQuality >= 8 ? "bg-emerald-500" : f.sessionQuality >= 5 ? "bg-amber-500" : "bg-slate-600"} />
-            <FactorBar label="R:R"       value={f.rrQuality}     max={10} color={f.rrQuality >= 8 ? "bg-emerald-500" : f.rrQuality >= 4 ? "bg-amber-500" : "bg-rose-500"} />
+            <FactorBar label="Proximity"  value={f.proximity}      max={25} color={f.proximity >= 20 ? "bg-emerald-500" : f.proximity >= 10 ? "bg-amber-500" : "bg-slate-600"} />
+            <FactorBar label="EMA"        value={f.emaConfluence}  max={20} color={f.emaConfluence >= 16 ? "bg-emerald-500" : f.emaConfluence >= 8 ? "bg-amber-500" : "bg-rose-500"} />
+            <FactorBar label="Weekly"     value={f.weeklyTrend}    max={15} color={f.weeklyTrend >= 10 ? "bg-emerald-500" : f.weeklyTrend >= 6 ? "bg-amber-500" : "bg-rose-500"} />
+            <FactorBar label="Rejection"  value={f.rejection}      max={15} color={f.rejection >= 12 ? "bg-emerald-500" : f.rejection > 0 ? "bg-amber-500" : "bg-slate-700"} />
+            <FactorBar label="Momentum"   value={f.momentum}       max={10} color={f.momentum >= 7 ? "bg-emerald-500" : f.momentum >= 4 ? "bg-amber-500" : "bg-slate-600"} />
+            <FactorBar label="Session"    value={f.sessionQuality} max={10} color={f.sessionQuality >= 8 ? "bg-emerald-500" : f.sessionQuality >= 5 ? "bg-amber-500" : "bg-slate-600"} />
+            <FactorBar label="R:R"        value={f.rrQuality}      max={10} color={f.rrQuality >= 8 ? "bg-emerald-500" : f.rrQuality >= 4 ? "bg-amber-500" : "bg-rose-500"} />
           </div>
         </div>
 
         {/* ── Context chips ────────────────────────────────────────────────── */}
         <div className="flex flex-wrap gap-1.5 mb-3">
+          {/* Weekly bias chip */}
+          {(() => {
+            const wb = signal.weeklyBias ?? "Ranging";
+            const aligns = (wb === "Bullish" && isBuy) || (wb === "Bearish" && !isBuy);
+            const tone: "good" | "warn" | "bad" =
+              wb === "Ranging" ? "warn" : aligns ? "good" : "bad";
+            const icon = wb === "Bullish"
+              ? <TrendingUp size={9} />
+              : wb === "Bearish"
+              ? <TrendingDown size={9} />
+              : <ShieldAlert size={9} />;
+            return (
+              <Chip
+                icon={icon}
+                label={`W ${wb}`}
+                tone={tone}
+              />
+            );
+          })()}
           <Chip
             icon={signal.trend === "Bullish" ? <TrendingUp size={9} /> : <TrendingDown size={9} />}
-            label={`${signal.trend} 4H`}
+            label={`4H ${signal.trend}`}
             tone={signal.trend === "Bullish" ? "good" : "bad"}
           />
           <Chip
             icon={signal.trendAligned ? <Zap size={9} /> : <ShieldAlert size={9} />}
-            label={signal.trendAligned ? "D↔4H aligned" : "TF split"}
+            label={signal.trendAligned ? "D↔4H" : "TF split"}
             tone={signal.trendAligned ? "good" : "warn"}
           />
           {signal.newsBlocked && (

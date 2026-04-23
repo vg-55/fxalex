@@ -348,7 +348,103 @@ export async function fetchCloses4h(pair: CandlePair, count = 60): Promise<numbe
 }
 
 // ---------------------------------------------------------------------------
-// 1H candles — used for entry-timeframe rejection check (1H/15m per strategy)
+// Weekly candles — used for macro trend (weekly HH/HL structure + EMA-10)
+// Strategy: Weekly/Daily bias must be established before any signal fires.
+// Cache TTL: 4 hours (weekly bars change very slowly)
+// ---------------------------------------------------------------------------
+
+const weeklyCache = new Map<string, { at: number; candles: Candle[] }>();
+const TTL_WEEKLY_MS = 4 * 3600_000;
+
+async function yahooWeekly(pair: CandlePair, count: number): Promise<Candle[] | null> {
+  const sym = encodeURIComponent(YAHOO_SYMBOL[pair]);
+  for (const host of YAHOO_HOSTS) {
+    const url = `https://${host}/v8/finance/chart/${sym}?interval=1wk&range=3y`;
+    try {
+      const res = await fetchWithTimeout(url, {
+        timeoutMs: 6000,
+        cache: "no-store",
+        headers: YAHOO_HEADERS,
+      });
+      if (res.status === 429) { continue; }
+      if (!res.ok) break;
+      const data = await res.json();
+      const r = data?.chart?.result?.[0];
+      const ts: number[] | undefined = r?.timestamp;
+      const q = r?.indicators?.quote?.[0];
+      const o: (number | null)[] | undefined = q?.open;
+      const h: (number | null)[] | undefined = q?.high;
+      const l: (number | null)[] | undefined = q?.low;
+      const c: (number | null)[] | undefined = q?.close;
+      if (!ts || !o || !h || !l || !c) break;
+      const candles: Candle[] = [];
+      for (let i = 0; i < ts.length; i++) {
+        if (
+          typeof o[i] === "number" && typeof h[i] === "number" &&
+          typeof l[i] === "number" && typeof c[i] === "number"
+        ) {
+          candles.push({ t: ts[i], o: o[i]!, h: h[i]!, l: l[i]!, c: c[i]! });
+        }
+      }
+      const out = candles.slice(-count);
+      if (out.length >= 12) {
+        return out;
+      }
+      break;
+    } catch { /* try next host */ }
+  }
+  return null;
+}
+
+async function twelveDataWeekly(pair: CandlePair, count: number): Promise<Candle[] | null> {
+  const apiKey = process.env.TWELVEDATA_API_KEY;
+  if (!apiKey || apiKey === "your_twelvedata_key_here") return null;
+  const url = `https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(
+    TD_SYMBOL[pair]
+  )}&interval=1week&outputsize=${count}&apikey=${apiKey}`;
+  try {
+    const res = await fetchWithTimeout(url, { timeoutMs: 8000, cache: "no-store" });
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (data?.status === "error") return null;
+    const values: Array<{ datetime: string; open: string; high: string; low: string; close: string }> =
+      data?.values ?? [];
+    if (values.length < 12) return null;
+    return values
+      .map((v) => ({
+        t: Math.floor(new Date(v.datetime).getTime() / 1000),
+        o: parseFloat(v.open),
+        h: parseFloat(v.high),
+        l: parseFloat(v.low),
+        c: parseFloat(v.close),
+      }))
+      .filter((c) => Number.isFinite(c.o) && Number.isFinite(c.c))
+      .reverse()
+      .slice(-count);
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchCandlesWeekly(pair: CandlePair, count = 30): Promise<Candle[] | null> {
+  const key = `1wk:${pair}:${count}`;
+  const hit = weeklyCache.get(key);
+  if (hit && Date.now() - hit.at < TTL_WEEKLY_MS) return hit.candles;
+
+  let candles = await yahooWeekly(pair, count);
+  if (!candles) candles = await twelveDataWeekly(pair, count);
+
+  if (candles) {
+    weeklyCache.set(key, { at: Date.now(), candles });
+    return candles;
+  }
+  // Return stale cache rather than null — weekly data is unlikely to cause wrong signals
+  if (hit) {
+    console.warn(`[candles:weekly] ${pair} using stale cache`);
+    return hit.candles;
+  }
+  return null;
+}
 // Reuses the Yahoo 1h route already fetched for 4H aggregation, but returns
 // raw 1H bars. TTL is 15 minutes (much shorter than 4H at 30 min).
 // ---------------------------------------------------------------------------

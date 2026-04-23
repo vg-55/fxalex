@@ -2,10 +2,10 @@ import { db, assertDb, schema } from "@/db/client";
 import { and, eq, lt, or, isNull, sql } from "drizzle-orm";
 import { buildSignal, generateAIInterpretation, generateAIConfidenceBoost, type EngineSignal } from "./engine";
 import { fetchLivePricesValidated } from "./prices";
-import { fetchCandles4h, fetchClosesDaily, fetchCandles1h, type CandlePair } from "./candles";
+import { fetchCandles4h, fetchClosesDaily, fetchCandles1h, fetchCandlesWeekly, type CandlePair } from "./candles";
 import { ema } from "./ema";
 import { atr } from "./atr";
-import { hasRejection, emaAoiConfluence, isImpulsiveMove } from "./patterns";
+import { hasRejection, emaAoiConfluence, isImpulsiveMove, isPinBar, getWickLevel, weeklyBiasScore } from "./patterns";
 import { refreshNewsIfStale, nextRelevantEvent } from "./news";
 import { evaluateOutcomes } from "./outcomes";
 import { pushExternal } from "./notifier";
@@ -178,15 +178,17 @@ export async function runScanOnce(): Promise<ScanSummary> {
       atrValue?: number;
       candles?: Awaited<ReturnType<typeof fetchCandles4h>>;
       candles1h?: Awaited<ReturnType<typeof fetchCandles1h>>;
+      weeklyCandles?: Awaited<ReturnType<typeof fetchCandlesWeekly>>;
     };
     const enrich: Record<string, PairEnrichment> = {};
     await Promise.all(
       instruments.map(async (inst) => {
         const pair = inst.pair as CandlePair;
-        const [candles, dailyCloses, candles1h] = await Promise.all([
+        const [candles, dailyCloses, candles1h, weeklyCandles] = await Promise.all([
           fetchCandles4h(pair, 60),
           fetchClosesDaily(pair),
-          fetchCandles1h(pair, 20), // last 20 × 1H bars for rejection + impulse check
+          fetchCandles1h(pair, 20),
+          fetchCandlesWeekly(pair, 30), // 30 weekly bars for structure + EMA-10
         ]);
         const e: PairEnrichment = {};
         if (candles && candles.length >= 50) {
@@ -201,9 +203,8 @@ export async function runScanOnce(): Promise<ScanSummary> {
           const v = ema(dailyCloses, 50);
           if (v != null && Number.isFinite(v)) e.emaDaily = v;
         }
-        if (candles1h && candles1h.length >= 5) {
-          e.candles1h = candles1h;
-        }
+        if (candles1h && candles1h.length >= 5) e.candles1h = candles1h;
+        if (weeklyCandles && weeklyCandles.length >= 6) e.weeklyCandles = weeklyCandles;
         enrich[pair] = e;
       })
     );
@@ -240,20 +241,32 @@ export async function runScanOnce(): Promise<ScanSummary> {
       const trendAligned = fourHBias === dailyBias;
 
       const rejectionConfirmed = pe.candles1h
-        ? hasRejection(pe.candles1h, fourHBias)   // ← check on 1H candles per strategy
+        ? hasRejection(pe.candles1h, fourHBias)   // 1H candles per strategy
         : pe.candles
-        ? hasRejection(pe.candles, fourHBias)     // fallback to 4H if 1H unavailable
+        ? hasRejection(pe.candles, fourHBias)     // 4H fallback
         : false;
 
-      // EMA-in-AOI confluence (strategy: 50 EMA must also be inside the zone)
+      // EMA-in-AOI confluence grade
       const emaAoiGrade = (pe.ema4h != null)
         ? emaAoiConfluence(pe.ema4h, inst.aoiLow, inst.aoiHigh)
         : (0 as const);
 
-      // Anti-FOMO: detect if price made a large impulsive move recently
+      // Anti-FOMO: detect large impulsive move
       const isImpulsive = (pe.candles1h && pe.atrValue)
         ? isImpulsiveMove(pe.candles1h, pe.atrValue, fourHBias, 6, 2.0)
         : false;
+
+      // Weekly multi-factor bias (3-vote classifier)
+      const weeklyResult = pe.weeklyCandles
+        ? weeklyBiasScore(pe.weeklyCandles)
+        : null;
+      const weeklyBias = weeklyResult?.bias ?? "Ranging";
+      const weeklyTrendScore = weeklyResult?.factorScore ?? 7; // neutral fallback
+
+      // Wick SL: extract rejection candle wick level for ACTIVE setups
+      const rejectionCandleWick = (rejectionConfirmed && pe.candles1h)
+        ? getWickLevel(pe.candles1h, fourHBias)
+        : null;
 
       const upcoming = await nextRelevantEvent(pair, 30);
       const newsBlocked = upcoming !== null;
@@ -267,6 +280,9 @@ export async function runScanOnce(): Promise<ScanSummary> {
         candles: pe.candles ?? null,
         emaAoiGrade,
         isImpulsive,
+        weeklyBias,
+        weeklyTrendScore,
+        rejectionCandleWick,
       });
 
       if (quote.isStale) {

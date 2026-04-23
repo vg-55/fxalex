@@ -48,6 +48,7 @@ export type Signal = {
   tvSymbol: string;
   session: Session;
   trend: "Bullish" | "Bearish";
+  weeklyBias: "Bullish" | "Bearish" | "Ranging";
   changePercent?: number;
   dayHigh?: number;
   dayLow?: number;
@@ -56,11 +57,14 @@ export type Signal = {
   factors: {
     proximity: number;
     emaConfluence: number;
+    weeklyTrend: number;
     rejection: number;
     momentum: number;
     sessionQuality: number;
     rrQuality: number;
     aiBoost: number;
+    /** weeklyBias stored inside factors JSONB to avoid DB migration */
+    weeklyBias?: "Bullish" | "Bearish" | "Ranging";
   };
   liveEma50?: number;
   dailyEma50?: number;
@@ -105,6 +109,9 @@ export type StreamSignalRow = {
 
 export function rowToSignal(row: StreamSignalRow): Signal {
   const decimals = pairDecimals(row.pair);
+  const factors = row.factors;
+  // weeklyBias is stored inside factors.weeklyBias (no DB migration needed)
+  const weeklyBias: "Bullish" | "Bearish" | "Ranging" = factors?.weeklyBias ?? "Ranging";
   return {
     id: row.pair,
     pair: row.pair,
@@ -120,12 +127,13 @@ export function rowToSignal(row: StreamSignalRow): Signal {
     tvSymbol: row.tvSymbol,
     session: row.session,
     trend: row.trend,
+    weeklyBias,
     changePercent: row.changePct ?? undefined,
     dayHigh: row.dayHigh ?? undefined,
     dayLow: row.dayLow ?? undefined,
     aiInterpretation: row.aiInterpretation,
     aiConfidence: row.aiConfidence,
-    factors: row.factors,
+    factors,
     liveEma50: row.liveEma50 ?? undefined,
     dailyEma50: row.dailyEma50 ?? undefined,
     trendAligned: row.trendAligned,
