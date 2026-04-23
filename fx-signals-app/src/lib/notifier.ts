@@ -3,6 +3,9 @@
 // because of a push failure).
 
 import type { NotificationRow } from "@/db/schema";
+import { db } from "@/db/client";
+import { signals } from "@/db/schema";
+import { eq } from "drizzle-orm";
 
 const SEV_EMOJI: Record<string, string> = {
   info: "ℹ️",
@@ -18,10 +21,28 @@ function formatText(n: NotificationRow): string {
 }
 
 async function sendTelegram(n: NotificationRow): Promise<void> {
+  // Only push to Telegram for actionable signals (>= 85% accuracy)
+  if (n.severity !== "actionable") return;
+
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.TELEGRAM_CHAT_ID;
   if (!token || !chatId) return;
   try {
+    let text = formatText(n);
+    if (n.pair) {
+      const [sig] = await db.select().from(signals).where(eq(signals.pair, n.pair)).limit(1);
+      if (sig) {
+        text += `\n\n*Signal Details:*\n`;
+        text += `• Accuracy: ${sig.aiConfidence}%\n`;
+        text += `• Type: ${sig.type}\n`;
+        text += `• Price: ${sig.price}\n`;
+        text += `• TP: ${sig.tp}\n`;
+        text += `• SL: ${sig.sl}\n`;
+        text += `• RR: 1:${sig.rr}\n`;
+        text += `• Timeframe: ${sig.timeframe}`;
+      }
+    }
+
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5000);
     await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
@@ -29,7 +50,7 @@ async function sendTelegram(n: NotificationRow): Promise<void> {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         chat_id: chatId,
-        text: formatText(n),
+        text,
         parse_mode: "Markdown",
         disable_web_page_preview: true,
       }),
