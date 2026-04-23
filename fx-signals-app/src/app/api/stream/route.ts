@@ -1,5 +1,6 @@
 import { db, schema } from "@/db/client";
 import { desc, gt, isNull } from "drizzle-orm";
+import { maybeTriggerScan } from "@/lib/scanner";
 
 export const dynamic = "force-dynamic";
 
@@ -50,6 +51,9 @@ export async function GET(req: Request) {
       const poll = async () => {
         if (closed) return;
         try {
+          // Self-trigger hybrid cron: if we haven't seen a fresh scan in 90s, run one.
+          await maybeTriggerScan(90_000);
+
           const signals = await db.select().from(schema.signals);
           const hash = hashSignals(signals);
           if (hash !== lastSignalsHash) {

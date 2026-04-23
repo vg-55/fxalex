@@ -172,6 +172,7 @@ export const scannerState = pgTable("scanner_state", {
   consecutiveFailures: integer("consecutive_failures").notNull().default(0),
   activeProvider: text("active_provider"),
   backoffUntil: timestamp("backoff_until", { withTimezone: true }),
+  lockedUntil: timestamp("locked_until", { withTimezone: true }),
 });
 
 // ---------------------------------------------------------------------------

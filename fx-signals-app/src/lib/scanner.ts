@@ -1,5 +1,5 @@
 import { db, assertDb, schema } from "@/db/client";
-import { eq, lt } from "drizzle-orm";
+import { and, eq, lt, or, isNull, sql } from "drizzle-orm";
 import { buildSignal, generateAIInterpretation, type EngineSignal } from "./engine";
 import { fetchLivePricesValidated } from "./prices";
 import { fetchCandles4h, fetchClosesDaily, type CandlePair } from "./candles";
@@ -73,9 +73,70 @@ function titleFor(next: EngineSignal, prev: typeof schema.signals.$inferSelect |
   return `${next.pair} confidence ${prev.aiConfidence}% → ${next.aiConfidence}%`;
 }
 
+// Advisory lock via scanner_state.locked_until. Prevents concurrent scans
+// when multiple SSE connections (or external cron + SSE self-trigger) race.
+// Atomic: UPDATE ... WHERE locked_until IS NULL OR locked_until < NOW().
+async function tryAcquireScanLock(ttlMs = 90_000): Promise<boolean> {
+  const now = new Date();
+  const until = new Date(now.getTime() + ttlMs);
+  // Ensure row exists
+  await db
+    .insert(schema.scannerState)
+    .values({ id: 1 })
+    .onConflictDoNothing({ target: schema.scannerState.id });
+  const res = await db
+    .update(schema.scannerState)
+    .set({ lockedUntil: until })
+    .where(
+      and(
+        eq(schema.scannerState.id, 1),
+        or(isNull(schema.scannerState.lockedUntil), lt(schema.scannerState.lockedUntil, now))
+      )
+    )
+    .returning({ id: schema.scannerState.id });
+  return res.length > 0;
+}
+
+async function releaseScanLock(): Promise<void> {
+  await db
+    .update(schema.scannerState)
+    .set({ lockedUntil: null })
+    .where(eq(schema.scannerState.id, 1));
+}
+
+// Fire-and-forget self-trigger used by SSE stream when the last successful
+// scan is stale. Silently no-ops if another scan is already running.
+export async function maybeTriggerScan(staleAfterMs = 90_000): Promise<"triggered" | "fresh" | "locked"> {
+  const [state] = await db
+    .select()
+    .from(schema.scannerState)
+    .where(eq(schema.scannerState.id, 1));
+  const now = Date.now();
+  const fresh = state?.lastOkAt && now - state.lastOkAt.getTime() < staleAfterMs;
+  if (fresh) return "fresh";
+  const locked = state?.lockedUntil && state.lockedUntil.getTime() > now;
+  if (locked) return "locked";
+  // Fire & forget — don't block the caller.
+  runScanOnce().catch(() => undefined);
+  return "triggered";
+}
+
 export async function runScanOnce(): Promise<ScanSummary> {
   assertDb();
   const startedAt = new Date();
+
+  const acquired = await tryAcquireScanLock();
+  if (!acquired) {
+    return {
+      ok: false,
+      provider: null,
+      latencyMs: 0,
+      signalsCount: 0,
+      transitionsCount: 0,
+      error: "scan already in progress",
+      runId: "skipped",
+    };
+  }
 
   const [run] = await db
     .insert(schema.scannerRuns)
@@ -377,6 +438,8 @@ export async function runScanOnce(): Promise<ScanSummary> {
       .delete(schema.priceTicks)
       .where(lt(schema.priceTicks.fetchedAt, new Date(Date.now() - 48 * 3600_000)));
 
+    await releaseScanLock();
+
     return {
       ok: true,
       provider: prices.primary,
@@ -425,6 +488,8 @@ export async function runScanOnce(): Promise<ScanSummary> {
           .returning();
         if (n) pushExternal(n).catch(() => undefined);
       }
+    await releaseScanLock();
+
     }
 
     return {
