@@ -1,11 +1,13 @@
 // Live 4H + Daily candle fetcher for EMA-50, ATR, and rejection detection.
-// Primary: Yahoo chart. Fallback: Twelve Data time_series.
+// Primary: IBR Live (FX only). Fallbacks: Yahoo chart, then Twelve Data.
 
 export type Candle = { t: number; o: number; h: number; l: number; c: number };
 export type CandlePair = "XAUUSD" | "EURUSD" | "GBPUSD";
 
 const YAHOO_SYMBOL: Record<CandlePair, string> = {
-  XAUUSD: "XAUUSD=X",
+  // `XAUUSD=X` is delisted on Yahoo (404). `GC=F` is COMEX front-month gold
+  // futures and is the working spot-gold proxy on Yahoo Finance.
+  XAUUSD: "GC=F",
   EURUSD: "EURUSD=X",
   GBPUSD: "GBPUSD=X",
 };
@@ -15,6 +17,14 @@ const TD_SYMBOL: Record<CandlePair, string> = {
   EURUSD: "EUR/USD",
   GBPUSD: "GBP/USD",
 };
+
+// IBR Live only covers FX pairs (no gold).
+const IBR_SYMBOL: Partial<Record<CandlePair, string>> = {
+  EURUSD: "EURUSD",
+  GBPUSD: "GBPUSD",
+};
+
+const IBR_BASE = "https://api.ibrlive.com/api";
 
 const TTL_MS = 30 * 60_000;
 const cache = new Map<string, { at: number; candles: Candle[] }>();
@@ -32,6 +42,102 @@ async function fetchWithTimeout(
   } finally {
     clearTimeout(id);
   }
+}
+
+// --- IBR Live candles ------------------------------------------------------
+// `aggregate/data` returns results newest-first in milliseconds; we normalize
+// to oldest-first with timestamps in seconds (to match the existing shape
+// the rest of the codebase expects).
+
+type IbrAggBar = { o: number; h: number; l: number; c: number; t: number };
+type IbrAggResponse = {
+  success: boolean;
+  data?: { results?: IbrAggBar[] };
+};
+
+async function ibrAggregate(
+  pair: CandlePair,
+  timeframe: "hour" | "day",
+  limit: number,
+  timeoutMs: number
+): Promise<Candle[] | null> {
+  const sym = IBR_SYMBOL[pair];
+  if (!sym) return null; // e.g. XAUUSD — not supported by IBR Live
+  const apiKey = process.env.IBR_LIVE_API_KEY;
+  if (!apiKey || apiKey === "your_ibr_live_key_here") return null;
+
+  const url = `${IBR_BASE}/aggregate/data?symbol=${sym}&timeframe=${timeframe}&limit=${limit}`;
+  try {
+    const res = await fetchWithTimeout(url, {
+      timeoutMs,
+      cache: "no-store",
+      headers: { "x-api-key": apiKey, Accept: "application/json" },
+    });
+    if (!res.ok) {
+      console.warn(`[candles:ibrlive:${timeframe}] ${pair} HTTP ${res.status}`);
+      return null;
+    }
+    const data = (await res.json()) as IbrAggResponse;
+    if (!data.success) return null;
+    const bars = data.data?.results ?? [];
+    if (bars.length === 0) return null;
+
+    // Newest-first → oldest-first; t ms → s; filter out malformed rows.
+    const candles: Candle[] = bars
+      .slice()
+      .reverse()
+      .filter(
+        (b) =>
+          Number.isFinite(b.o) &&
+          Number.isFinite(b.h) &&
+          Number.isFinite(b.l) &&
+          Number.isFinite(b.c) &&
+          Number.isFinite(b.t)
+      )
+      .map((b) => ({
+        t: Math.floor(b.t / 1000),
+        o: b.o,
+        h: b.h,
+        l: b.l,
+        c: b.c,
+      }));
+    return candles.length ? candles : null;
+  } catch (e) {
+    console.warn(`[candles:ibrlive:${timeframe}] ${pair} failed:`, (e as Error).message);
+    return null;
+  }
+}
+
+/** Aggregate a list of 1h candles into 4h candles (4-at-a-time, oldest-first). */
+function aggregate1hTo4h(hourly: Candle[]): Candle[] {
+  const fourH: Candle[] = [];
+  for (let i = 0; i + 4 <= hourly.length; i += 4) {
+    const slice = hourly.slice(i, i + 4);
+    fourH.push({
+      t: slice[0].t,
+      o: slice[0].o,
+      h: Math.max(...slice.map((x) => x.h)),
+      l: Math.min(...slice.map((x) => x.l)),
+      c: slice[3].c,
+    });
+  }
+  return fourH;
+}
+
+async function ibrLive4h(pair: CandlePair, count: number): Promise<Candle[] | null> {
+  // Fetch enough hourly bars to produce `count` 4H bars (with head-room for gaps)
+  const hourly = await ibrAggregate(pair, "hour", Math.max(count * 5, 240), 8000);
+  if (!hourly || hourly.length < 200) return null;
+  const fourH = aggregate1hTo4h(hourly);
+  const out = fourH.slice(-count);
+  return out.length >= 50 ? out : null;
+}
+
+async function ibrLiveDaily(pair: CandlePair): Promise<number[] | null> {
+  const daily = await ibrAggregate(pair, "day", 200, 8000);
+  if (!daily) return null;
+  const closes = daily.map((c) => c.c).filter((n) => Number.isFinite(n));
+  return closes.length >= 50 ? closes : null;
 }
 
 async function yahoo4h(pair: CandlePair, count: number): Promise<Candle[] | null> {
@@ -72,17 +178,7 @@ async function yahoo4h(pair: CandlePair, count: number): Promise<Candle[] | null
         hourly.push({ t: ts[i], o: o[i]!, h: h[i]!, l: l[i]!, c: c[i]! });
       }
     }
-    const fourH: Candle[] = [];
-    for (let i = 0; i + 4 <= hourly.length; i += 4) {
-      const slice = hourly.slice(i, i + 4);
-      fourH.push({
-        t: slice[0].t,
-        o: slice[0].o,
-        h: Math.max(...slice.map((x) => x.h)),
-        l: Math.min(...slice.map((x) => x.l)),
-        c: slice[3].c,
-      });
-    }
+    const fourH = aggregate1hTo4h(hourly);
     const out = fourH.slice(-count);
     return out.length >= 50 ? out : null;
   } catch (e) {
@@ -126,7 +222,10 @@ export async function fetchCandles4h(pair: CandlePair, count = 60): Promise<Cand
   const hit = cache.get(key);
   if (hit && Date.now() - hit.at < TTL_MS) return hit.candles;
 
-  let candles = await yahoo4h(pair, count);
+  // IBR Live → Yahoo → Twelve Data. IBR Live returns null for XAUUSD
+  // (unsupported), so gold naturally falls through to Yahoo.
+  let candles = await ibrLive4h(pair, count);
+  if (!candles) candles = await yahoo4h(pair, count);
   if (!candles) candles = await twelveData4h(pair, count);
 
   if (candles) {
@@ -194,7 +293,9 @@ export async function fetchClosesDaily(pair: CandlePair): Promise<number[] | nul
   const hit = dailyCache.get(key);
   if (hit && Date.now() - hit.at < 6 * 3600_000) return hit.closes;
 
-  let closes = await yahooDaily(pair);
+  // IBR Live → Yahoo → Twelve Data (XAUUSD falls through to Yahoo automatically).
+  let closes = await ibrLiveDaily(pair);
+  if (!closes) closes = await yahooDaily(pair);
   if (!closes) closes = await twelveDataDaily(pair);
 
   if (closes) {

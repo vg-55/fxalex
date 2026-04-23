@@ -15,7 +15,7 @@ export type PriceBundle = {
   EURUSD: Quote;
   GBPUSD: Quote;
   XAUUSD: Quote;
-  source: "yahoo" | "finnhub" | "twelvedata" | "alphavantage";
+  source: "ibrlive+yahoo" | "yahoo" | "finnhub" | "twelvedata" | "alphavantage";
   fetchedAt: string;
 };
 
@@ -43,42 +43,164 @@ async function fetchWithTimeout(
 // Providers
 // ---------------------------------------------------------------------------
 
-async function fromYahoo(): Promise<PriceBundle> {
-  const fetchSymbol = async (sym: string): Promise<Quote> => {
-    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${sym}?interval=1m&range=1d`;
-    const res = await fetchWithTimeout(url, {
-      timeoutMs: 5000,
-      cache: "no-store",
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
-        Accept: "application/json,text/plain,*/*",
-      },
-    });
-    if (!res.ok) throw new Error(`Yahoo HTTP ${res.status} for ${sym}`);
-    const data = await res.json();
-    const meta = data?.chart?.result?.[0]?.meta;
-    if (!meta || typeof meta.regularMarketPrice !== "number") {
-      throw new Error(`Yahoo invalid meta for ${sym}`);
-    }
-    const price = meta.regularMarketPrice;
-    const prev = meta.previousClose || price;
-    const change = price - prev;
-    const changePercent = prev ? (change / prev) * 100 : undefined;
+// --- IBR Live --------------------------------------------------------------
+// https://api.ibrlive.com/api  — covers FX only (no XAUUSD). We fetch the
+// snapshot for EURUSD/GBPUSD, previous-close for change%, and patch XAUUSD
+// in from Yahoo's chart endpoint.
 
-    return {
-      price,
-      change,
-      changePercent,
-      dayHigh: meta.regularMarketDayHigh,
-      dayLow: meta.regularMarketDayLow,
-    };
+const IBR_BASE = "https://api.ibrlive.com/api";
+
+type IbrSnapshotQuote = { s: string; a: number; b: number; t: number };
+type IbrSnapshotResponse = { success: boolean; lastQuotes?: IbrSnapshotQuote[] };
+type IbrPrevClose = { open: number; high: number; low: number; close: number };
+type IbrPrevCloseResponse = { success: boolean; data?: IbrPrevClose };
+
+async function ibrGet<T>(path: string, apiKey: string, timeoutMs = 6000): Promise<T> {
+  const res = await fetchWithTimeout(`${IBR_BASE}${path}`, {
+    timeoutMs,
+    cache: "no-store",
+    headers: { "x-api-key": apiKey, Accept: "application/json" },
+  });
+  if (!res.ok) throw new Error(`IBR Live HTTP ${res.status} for ${path}`);
+  const data = (await res.json()) as T & { success?: boolean };
+  if (data && "success" in data && data.success === false) {
+    throw new Error(`IBR Live error for ${path}`);
+  }
+  return data;
+}
+
+/** Fetches a single Yahoo symbol via the v8 chart endpoint (matches fromYahoo). */
+async function yahooChartQuote(sym: string): Promise<Quote> {
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${sym}?interval=1m&range=1d`;
+  const res = await fetchWithTimeout(url, {
+    timeoutMs: 5000,
+    cache: "no-store",
+    headers: {
+      "User-Agent":
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+      Accept: "application/json,text/plain,*/*",
+    },
+  });
+  if (!res.ok) throw new Error(`Yahoo HTTP ${res.status} for ${sym}`);
+  const data = await res.json();
+  const meta = data?.chart?.result?.[0]?.meta;
+  if (!meta || typeof meta.regularMarketPrice !== "number") {
+    throw new Error(`Yahoo invalid meta for ${sym}`);
+  }
+  const price = meta.regularMarketPrice;
+  const prev = meta.previousClose || price;
+  const change = price - prev;
+  const changePercent = prev ? (change / prev) * 100 : undefined;
+  return {
+    price,
+    change,
+    changePercent,
+    dayHigh: meta.regularMarketDayHigh,
+    dayLow: meta.regularMarketDayLow,
   };
+}
 
+function ibrBuildQuote(tick: IbrSnapshotQuote, prev: IbrPrevClose | null): Quote {
+  const price = (tick.a + tick.b) / 2;
+  const q: Quote = { price, bid: tick.b, ask: tick.a };
+  if (prev) {
+    const change = price - prev.close;
+    q.change = change;
+    q.changePercent = prev.close ? (change / prev.close) * 100 : undefined;
+    q.dayHigh = prev.high;
+    q.dayLow = prev.low;
+  }
+  return q;
+}
+
+/**
+ * Per-pair XAUUSD cascade: IBR Live has no gold, so we try every
+ * non-IBR provider in turn. Used inside `fromIbrLive` so a single
+ * gold-provider failure doesn't kill the whole bundle.
+ */
+async function fetchXauusdViaCascade(): Promise<Quote> {
+  const errors: string[] = [];
+
+  try { return await yahooChartQuote("GC=F"); }
+  catch (e) { errors.push(`yahoo: ${(e as Error).message}`); }
+
+  const fhKey = process.env.FINNHUB_API_KEY;
+  if (fhKey && fhKey !== "your_finnhub_key_here") {
+    try { return await finnhubQuote("OANDA:XAU_USD", fhKey); }
+    catch (e) { errors.push(`finnhub: ${(e as Error).message}`); }
+  }
+
+  const tdKey = process.env.TWELVEDATA_API_KEY;
+  if (tdKey && tdKey !== "your_twelvedata_key_here") {
+    try {
+      const url = `https://api.twelvedata.com/quote?symbol=${encodeURIComponent(
+        "XAU/USD"
+      )}&apikey=${tdKey}`;
+      const res = await fetchWithTimeout(url, { timeoutMs: 8000, cache: "no-store" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      if (data?.status === "error") throw new Error(data.message ?? "error");
+      const p = data?.close ?? data?.price;
+      if (!p) throw new Error("missing close/price");
+      const price = parseFloat(p);
+      if (!Number.isFinite(price)) throw new Error("invalid price");
+      return {
+        price,
+        change: data.change ? parseFloat(data.change) : undefined,
+        changePercent: data.percent_change ? parseFloat(data.percent_change) : undefined,
+        dayHigh: data.high ? parseFloat(data.high) : undefined,
+        dayLow: data.low ? parseFloat(data.low) : undefined,
+      };
+    } catch (e) { errors.push(`twelvedata: ${(e as Error).message}`); }
+  }
+
+  const avKey = process.env.ALPHAVANTAGE_API_KEY;
+  if (avKey && avKey !== "your_alphavantage_key_here") {
+    try {
+      const price = await fetchAVRate("XAU", "USD", avKey);
+      return { price };
+    } catch (e) { errors.push(`alphavantage: ${(e as Error).message}`); }
+  }
+
+  throw new Error(`XAUUSD unavailable: ${errors.join(" | ")}`);
+}
+
+async function fromIbrLive(apiKey: string): Promise<PriceBundle> {
+  const [snapshot, prevEUR, prevGBP, xau] = await Promise.all([
+    ibrGet<IbrSnapshotResponse>("/forex/snapshot", apiKey),
+    ibrGet<IbrPrevCloseResponse>("/forex/previous-close?symbol=EURUSD", apiKey).catch(
+      () => null as IbrPrevCloseResponse | null
+    ),
+    ibrGet<IbrPrevCloseResponse>("/forex/previous-close?symbol=GBPUSD", apiKey).catch(
+      () => null as IbrPrevCloseResponse | null
+    ),
+    fetchXauusdViaCascade(),
+  ]);
+
+  const quotes: IbrSnapshotQuote[] = snapshot.lastQuotes ?? [];
+  const eurTick = quotes.find((q) => q.s === "EURUSD");
+  const gbpTick = quotes.find((q) => q.s === "GBPUSD");
+  if (!eurTick) throw new Error("IBR Live: missing EURUSD in snapshot");
+  if (!gbpTick) throw new Error("IBR Live: missing GBPUSD in snapshot");
+
+  return {
+    EURUSD: ibrBuildQuote(eurTick, prevEUR?.data ?? null),
+    GBPUSD: ibrBuildQuote(gbpTick, prevGBP?.data ?? null),
+    XAUUSD: xau,
+    source: "ibrlive+yahoo",
+    fetchedAt: new Date().toISOString(),
+  };
+}
+
+// --- Yahoo -----------------------------------------------------------------
+
+async function fromYahoo(): Promise<PriceBundle> {
   const [EURUSD, GBPUSD, XAUUSD] = await Promise.all([
-    fetchSymbol("EURUSD=X"),
-    fetchSymbol("GBPUSD=X"),
-    fetchSymbol("XAUUSD=X"),
+    yahooChartQuote("EURUSD=X"),
+    yahooChartQuote("GBPUSD=X"),
+    // `XAUUSD=X` is delisted on Yahoo (404). `GC=F` is COMEX front-month gold
+    // futures and is the working spot-gold proxy on Yahoo Finance.
+    yahooChartQuote("GC=F"),
   ]);
 
   return {
@@ -178,10 +300,15 @@ async function fromAlphaVantage(apiKey: string): Promise<PriceBundle> {
 export async function fetchLivePrices(): Promise<PriceBundle> {
   const errors: string[] = [];
 
-  // Try Yahoo first but abandon after 5 s — Vercel IPs are frequently blocked
-  // by Yahoo, causing 20+ second hangs before a connection error is thrown.
-  // The AbortController timeout inside fromYahoo already limits individual
-  // symbol fetches to 5 s; this outer try-catch captures that quickly.
+  // 1. IBR Live — primary for FX (EURUSD/GBPUSD); XAUUSD patched in from Yahoo.
+  const ibrKey = process.env.IBR_LIVE_API_KEY;
+  if (ibrKey && ibrKey !== "your_ibr_live_key_here") {
+    try { return await fromIbrLive(ibrKey); }
+    catch (e) { errors.push(`ibrlive: ${(e as Error).message}`); }
+  }
+
+  // 2. Yahoo — full fallback (unlimited, no key).
+  // Individual symbol fetches are already bounded to 5 s via fetchWithTimeout.
   try { return await fromYahoo(); }
   catch (e) { errors.push(`yahoo: ${(e as Error).message}`); }
 
@@ -234,6 +361,10 @@ function computeDeviation(a: number, b: number): number {
 }
 
 async function fetchSecondary(): Promise<PriceBundle | null> {
+  // Prefer Yahoo as the secondary — it's free, covers all three pairs, and is
+  // the most independent from IBR Live (different data path entirely).
+  try { return await fromYahoo(); } catch { /* fall through */ }
+
   const fhKey = process.env.FINNHUB_API_KEY;
   if (fhKey && fhKey !== "your_finnhub_key_here") {
     try { return await fromFinnhub(fhKey); } catch { /* fall through */ }

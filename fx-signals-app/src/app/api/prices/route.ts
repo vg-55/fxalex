@@ -20,7 +20,13 @@ export type PriceData = {
   EURUSD: Quote;
   GBPUSD: Quote;
   XAUUSD: Quote;
-  source: "yahoo" | "finnhub" | "twelvedata" | "exchangerate.host" | "alphavantage";
+  source:
+    | "ibrlive+yahoo"
+    | "yahoo"
+    | "finnhub"
+    | "twelvedata"
+    | "exchangerate.host"
+    | "alphavantage";
   fetchedAt: string;
 };
 
@@ -33,13 +39,164 @@ let cacheTimestamp = 0;
 const CACHE_TTL_MS = 5_000;
 
 // ---------------------------------------------------------------------------
-// Provider 1: Yahoo Finance  (PRIMARY — unlimited, no key, rich payload)
+// Provider 1: IBR Live  (PRIMARY for FX — EURUSD, GBPUSD)
+//   https://api.ibrlive.com/api/forex/snapshot       — live bid/ask
+//   https://api.ibrlive.com/api/forex/previous-close — prior-session OHLC
+//   Auth: x-api-key header
+//   IBR Live does NOT cover XAUUSD, so we patch gold in from Yahoo.
+// ---------------------------------------------------------------------------
+
+const IBR_BASE = "https://api.ibrlive.com/api";
+
+type IbrSnapshotQuote = { s: string; a: number; b: number; t: number };
+type IbrSnapshotResponse = { success: boolean; lastQuotes?: IbrSnapshotQuote[] };
+type IbrPrevClose = { open: number; high: number; low: number; close: number };
+type IbrPrevCloseResponse = { success: boolean; data?: IbrPrevClose };
+
+async function ibrGet<T>(path: string, apiKey: string): Promise<T> {
+  const res = await fetch(`${IBR_BASE}${path}`, {
+    cache: "no-store",
+    headers: { "x-api-key": apiKey, Accept: "application/json" },
+  });
+  if (!res.ok) throw new Error(`IBR Live HTTP ${res.status} for ${path}`);
+  const data = (await res.json()) as T & { success?: boolean };
+  if (data && "success" in data && data.success === false) {
+    throw new Error(`IBR Live error for ${path}`);
+  }
+  return data;
+}
+
+/** Fetch a single Yahoo symbol using the v7 quote endpoint. */
+async function yahooSingle(symbol: string): Promise<Quote> {
+  const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbol}`;
+  const res = await fetch(url, {
+    cache: "no-store",
+    headers: {
+      "User-Agent":
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+      Accept: "application/json,text/plain,*/*",
+    },
+  });
+  if (!res.ok) throw new Error(`Yahoo HTTP ${res.status}`);
+  const data = await res.json();
+  const r = data?.quoteResponse?.result?.[0];
+  if (!r) throw new Error(`Yahoo: missing ${symbol}`);
+  const price = Number(r.regularMarketPrice);
+  if (!Number.isFinite(price)) throw new Error(`Yahoo: invalid ${symbol} price`);
+  return {
+    price,
+    bid: typeof r.bid === "number" ? r.bid : undefined,
+    ask: typeof r.ask === "number" ? r.ask : undefined,
+    change: typeof r.regularMarketChange === "number" ? r.regularMarketChange : undefined,
+    changePercent:
+      typeof r.regularMarketChangePercent === "number" ? r.regularMarketChangePercent : undefined,
+    dayHigh: typeof r.regularMarketDayHigh === "number" ? r.regularMarketDayHigh : undefined,
+    dayLow: typeof r.regularMarketDayLow === "number" ? r.regularMarketDayLow : undefined,
+  };
+}
+
+/** Build a Quote from an IBR snapshot tick + (optional) previous-close OHLC. */
+function ibrBuildQuote(tick: IbrSnapshotQuote, prev: IbrPrevClose | null): Quote {
+  const price = (tick.a + tick.b) / 2; // mid
+  const q: Quote = { price, bid: tick.b, ask: tick.a };
+  if (prev) {
+    const change = price - prev.close;
+    q.change = change;
+    q.changePercent = prev.close ? (change / prev.close) * 100 : undefined;
+    q.dayHigh = prev.high;
+    q.dayLow = prev.low;
+  }
+  return q;
+}
+
+/**
+ * Per-pair XAUUSD cascade: IBR Live has no gold, so we try every
+ * non-IBR provider in turn. Used inside `fromIbrLive` so a single
+ * gold-provider failure doesn't kill the whole bundle.
+ */
+async function fetchXauusdViaCascade(): Promise<Quote> {
+  const errors: string[] = [];
+
+  try { return await yahooSingle("GC=F"); }
+  catch (e) { errors.push(`yahoo: ${(e as Error).message}`); }
+
+  const fhKey = process.env.FINNHUB_API_KEY;
+  if (fhKey && fhKey !== "your_finnhub_key_here") {
+    try { return await finnhubQuote("OANDA:XAU_USD", fhKey); }
+    catch (e) { errors.push(`finnhub: ${(e as Error).message}`); }
+  }
+
+  const tdKey = process.env.TWELVEDATA_API_KEY;
+  if (tdKey && tdKey !== "your_twelvedata_key_here") {
+    try {
+      const url = `https://api.twelvedata.com/quote?symbol=${encodeURIComponent(
+        "XAU/USD"
+      )}&apikey=${tdKey}`;
+      const res = await fetch(url, { cache: "no-store" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      if (data?.status === "error") throw new Error(data.message ?? "error");
+      const p = data?.close ?? data?.price;
+      if (!p) throw new Error("missing close/price");
+      const price = parseFloat(p);
+      if (!Number.isFinite(price)) throw new Error("invalid price");
+      return {
+        price,
+        change: data.change ? parseFloat(data.change) : undefined,
+        changePercent: data.percent_change ? parseFloat(data.percent_change) : undefined,
+        dayHigh: data.high ? parseFloat(data.high) : undefined,
+        dayLow: data.low ? parseFloat(data.low) : undefined,
+      };
+    } catch (e) { errors.push(`twelvedata: ${(e as Error).message}`); }
+  }
+
+  const avKey = process.env.ALPHAVANTAGE_API_KEY;
+  if (avKey && avKey !== "your_alphavantage_key_here") {
+    try {
+      const price = await fetchAVRate("XAU", "USD", avKey);
+      return { price };
+    } catch (e) { errors.push(`alphavantage: ${(e as Error).message}`); }
+  }
+
+  throw new Error(`XAUUSD unavailable: ${errors.join(" | ")}`);
+}
+
+async function fromIbrLive(apiKey: string): Promise<PriceData> {
+  // Snapshot + previous-close for EURUSD & GBPUSD; XAU via per-pair cascade
+  const [snapshot, prevEUR, prevGBP, xau] = await Promise.all([
+    ibrGet<IbrSnapshotResponse>("/forex/snapshot", apiKey),
+    ibrGet<IbrPrevCloseResponse>("/forex/previous-close?symbol=EURUSD", apiKey).catch(
+      () => null as IbrPrevCloseResponse | null
+    ),
+    ibrGet<IbrPrevCloseResponse>("/forex/previous-close?symbol=GBPUSD", apiKey).catch(
+      () => null as IbrPrevCloseResponse | null
+    ),
+    fetchXauusdViaCascade(),
+  ]);
+
+  const quotes: IbrSnapshotQuote[] = snapshot.lastQuotes ?? [];
+  const eurTick = quotes.find((q) => q.s === "EURUSD");
+  const gbpTick = quotes.find((q) => q.s === "GBPUSD");
+  if (!eurTick) throw new Error("IBR Live: missing EURUSD in snapshot");
+  if (!gbpTick) throw new Error("IBR Live: missing GBPUSD in snapshot");
+
+  return {
+    EURUSD: ibrBuildQuote(eurTick, prevEUR?.data ?? null),
+    GBPUSD: ibrBuildQuote(gbpTick, prevGBP?.data ?? null),
+    XAUUSD: xau,
+    source: "ibrlive+yahoo",
+    fetchedAt: new Date().toISOString(),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Provider 2: Yahoo Finance  (full fallback — unlimited, no key)
 //   query1.finance.yahoo.com/v7/finance/quote
-//   Symbols: EURUSD=X, GBPUSD=X, GC=F (gold futures) or XAUUSD=X
+//   Symbols: EURUSD=X, GBPUSD=X, GC=F (gold futures — XAUUSD=X is delisted)
 // ---------------------------------------------------------------------------
 
 async function fromYahoo(): Promise<PriceData> {
-  const symbols = ["EURUSD=X", "GBPUSD=X", "XAUUSD=X"];
+  const symbols = ["EURUSD=X", "GBPUSD=X", "GC=F"];
   const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbols.join(",")}`;
 
   const res = await fetch(url, {
@@ -77,7 +234,7 @@ async function fromYahoo(): Promise<PriceData> {
   return {
     EURUSD: pick("EURUSD=X"),
     GBPUSD: pick("GBPUSD=X"),
-    XAUUSD: pick("XAUUSD=X"),
+    XAUUSD: pick("GC=F"),
     source: "yahoo",
     fetchedAt: new Date().toISOString(),
   };
@@ -214,13 +371,20 @@ async function fromAlphaVantage(apiKey: string): Promise<PriceData> {
 }
 
 // ---------------------------------------------------------------------------
-// Orchestrator — Yahoo → Finnhub → Twelve Data → exchangerate.host → AV
+// Orchestrator — IBR Live → Yahoo → Finnhub → Twelve Data → exchangerate.host → AV
 // ---------------------------------------------------------------------------
 
 async function fetchPrices(): Promise<PriceData> {
   const errors: string[] = [];
 
-  // 1. Yahoo (free, unlimited, rich)
+  // 1. IBR Live (primary for FX; XAUUSD patched from Yahoo)
+  const ibrKey = process.env.IBR_LIVE_API_KEY;
+  if (ibrKey && ibrKey !== "your_ibr_live_key_here") {
+    try { return await fromIbrLive(ibrKey); }
+    catch (e) { errors.push(`ibrlive: ${(e as Error).message}`); }
+  }
+
+  // 2. Yahoo (free, unlimited, rich)
   try { return await fromYahoo(); }
   catch (e) { errors.push(`yahoo: ${(e as Error).message}`); }
 
