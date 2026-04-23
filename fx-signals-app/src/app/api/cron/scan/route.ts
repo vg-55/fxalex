@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { runScanOnce } from "@/lib/scanner";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 30;
+export const maxDuration = 60;
 
 function authorized(req: Request): boolean {
   // Vercel Cron sends a special header; also allow Bearer CRON_SECRET.
@@ -20,8 +20,11 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
   const result = await runScanOnce();
+  // Always return 200 so external cron services (cron-job.org) don't mark the
+  // job as failed and enter their own backoff/retry loops. The scan result
+  // body contains `ok: false` and `error` when the scan itself fails.
   return NextResponse.json(result, {
-    status: result.ok ? 200 : 502,
+    status: 200,
     headers: { "Cache-Control": "no-store" },
   });
 }

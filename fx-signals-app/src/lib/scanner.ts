@@ -458,7 +458,15 @@ export async function runScanOnce(): Promise<ScanSummary> {
 
     const [state] = await db.select().from(schema.scannerState).where(eq(schema.scannerState.id, 1));
     const fails = (state?.consecutiveFailures ?? 0) + 1;
-    const backoffUntil = fails >= 3 ? new Date(Date.now() + 2 * 60_000) : null;
+    // Exponential-ish backoff: 3 fails → 5 min, 6 fails → 10 min, 10+ fails → 20 min
+    let backoffUntil: Date | null = null;
+    if (fails >= 3) {
+      const backoffMs =
+        fails >= 10 ? 20 * 60_000 :
+        fails >= 6  ? 10 * 60_000 :
+                       5 * 60_000;
+      backoffUntil = new Date(Date.now() + backoffMs);
+    }
     await db
       .insert(schema.scannerState)
       .values({

@@ -19,12 +19,28 @@ const TD_SYMBOL: Record<CandlePair, string> = {
 const TTL_MS = 30 * 60_000;
 const cache = new Map<string, { at: number; candles: Candle[] }>();
 
+/** Wraps fetch with an AbortController timeout. */
+async function fetchWithTimeout(
+  url: string,
+  options: RequestInit & { timeoutMs?: number } = {}
+): Promise<Response> {
+  const { timeoutMs = 8000, ...rest } = options;
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...rest, signal: controller.signal });
+  } finally {
+    clearTimeout(id);
+  }
+}
+
 async function yahoo4h(pair: CandlePair, count: number): Promise<Candle[] | null> {
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
     YAHOO_SYMBOL[pair]
   )}?interval=1h&range=3mo`;
   try {
-    const res = await fetch(url, {
+    const res = await fetchWithTimeout(url, {
+      timeoutMs: 5000,
       cache: "no-store",
       headers: {
         "User-Agent":
@@ -82,7 +98,7 @@ async function twelveData4h(pair: CandlePair, count: number): Promise<Candle[] |
     TD_SYMBOL[pair]
   )}&interval=4h&outputsize=${count}&apikey=${apiKey}`;
   try {
-    const res = await fetch(url, { cache: "no-store" });
+    const res = await fetchWithTimeout(url, { timeoutMs: 8000, cache: "no-store" });
     if (!res.ok) return null;
     const data = await res.json();
     if (data?.status === "error") return null;
@@ -129,7 +145,8 @@ async function yahooDaily(pair: CandlePair): Promise<number[] | null> {
     YAHOO_SYMBOL[pair]
   )}?interval=1d&range=1y`;
   try {
-    const res = await fetch(url, {
+    const res = await fetchWithTimeout(url, {
+      timeoutMs: 5000,
       cache: "no-store",
       headers: {
         "User-Agent":
@@ -156,7 +173,7 @@ async function twelveDataDaily(pair: CandlePair): Promise<number[] | null> {
     TD_SYMBOL[pair]
   )}&interval=1day&outputsize=100&apikey=${apiKey}`;
   try {
-    const res = await fetch(url, { cache: "no-store" });
+    const res = await fetchWithTimeout(url, { timeoutMs: 8000, cache: "no-store" });
     if (!res.ok) return null;
     const data = await res.json();
     const values: Array<{ close: string }> = data?.values ?? [];

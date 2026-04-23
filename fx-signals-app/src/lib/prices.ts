@@ -20,13 +20,34 @@ export type PriceBundle = {
 };
 
 // ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/** Wraps fetch with an AbortController timeout. Throws on timeout or HTTP error. */
+async function fetchWithTimeout(
+  url: string,
+  options: RequestInit & { timeoutMs?: number } = {}
+): Promise<Response> {
+  const { timeoutMs = 8000, ...rest } = options;
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { ...rest, signal: controller.signal });
+    return res;
+  } finally {
+    clearTimeout(id);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Providers
 // ---------------------------------------------------------------------------
 
 async function fromYahoo(): Promise<PriceBundle> {
   const fetchSymbol = async (sym: string): Promise<Quote> => {
     const url = `https://query1.finance.yahoo.com/v8/finance/chart/${sym}?interval=1m&range=1d`;
-    const res = await fetch(url, {
+    const res = await fetchWithTimeout(url, {
+      timeoutMs: 5000,
       cache: "no-store",
       headers: {
         "User-Agent":
@@ -54,9 +75,11 @@ async function fromYahoo(): Promise<PriceBundle> {
     };
   };
 
-  const EURUSD = await fetchSymbol("EURUSD=X");
-  const GBPUSD = await fetchSymbol("GBPUSD=X");
-  const XAUUSD = await fetchSymbol("XAUUSD=X");
+  const [EURUSD, GBPUSD, XAUUSD] = await Promise.all([
+    fetchSymbol("EURUSD=X"),
+    fetchSymbol("GBPUSD=X"),
+    fetchSymbol("XAUUSD=X"),
+  ]);
 
   return {
     EURUSD,
@@ -69,7 +92,7 @@ async function fromYahoo(): Promise<PriceBundle> {
 
 async function finnhubQuote(symbol: string, apiKey: string): Promise<Quote> {
   const url = `https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(symbol)}&token=${apiKey}`;
-  const res = await fetch(url, { cache: "no-store" });
+  const res = await fetchWithTimeout(url, { timeoutMs: 6000, cache: "no-store" });
   if (!res.ok) throw new Error(`Finnhub HTTP ${res.status} for ${symbol}`);
   const d = await res.json();
   const price = Number(d?.c);
@@ -95,7 +118,7 @@ async function fromFinnhub(apiKey: string): Promise<PriceBundle> {
 async function fromTwelveData(apiKey: string): Promise<PriceBundle> {
   const symbols = "EUR/USD,GBP/USD,XAU/USD";
   const url = `https://api.twelvedata.com/quote?symbol=${encodeURIComponent(symbols)}&apikey=${apiKey}`;
-  const res = await fetch(url, { cache: "no-store" });
+  const res = await fetchWithTimeout(url, { timeoutMs: 8000, cache: "no-store" });
   if (!res.ok) throw new Error(`Twelve Data HTTP ${res.status}`);
   const data = await res.json();
   if (data?.status === "error") throw new Error(`Twelve Data: ${data.message ?? "error"}`);
@@ -124,7 +147,7 @@ async function fromTwelveData(apiKey: string): Promise<PriceBundle> {
 
 async function fetchAVRate(from: string, to: string, apiKey: string): Promise<number> {
   const url = `https://www.alphavantage.co/query?function=CURRENCY_EXCHANGE_RATE&from_currency=${from}&to_currency=${to}&apikey=${apiKey}`;
-  const res = await fetch(url, { cache: "no-store" });
+  const res = await fetchWithTimeout(url, { timeoutMs: 8000, cache: "no-store" });
   if (!res.ok) throw new Error(`AV HTTP ${res.status}`);
   const data = await res.json();
   if (data["Note"] || data["Information"]) throw new Error("AV rate-limited");
@@ -154,6 +177,11 @@ async function fromAlphaVantage(apiKey: string): Promise<PriceBundle> {
 
 export async function fetchLivePrices(): Promise<PriceBundle> {
   const errors: string[] = [];
+
+  // Try Yahoo first but abandon after 5 s — Vercel IPs are frequently blocked
+  // by Yahoo, causing 20+ second hangs before a connection error is thrown.
+  // The AbortController timeout inside fromYahoo already limits individual
+  // symbol fetches to 5 s; this outer try-catch captures that quickly.
   try { return await fromYahoo(); }
   catch (e) { errors.push(`yahoo: ${(e as Error).message}`); }
 
