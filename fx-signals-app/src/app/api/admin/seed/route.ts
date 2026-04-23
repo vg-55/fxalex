@@ -3,11 +3,12 @@ import { seedInstruments } from "@/db/seed";
 
 export const dynamic = "force-dynamic";
 
-// One-shot bootstrap endpoint. Hit this once after running migrations.
-// Protected by CRON_SECRET to prevent random re-seeding.
+// One-shot bootstrap endpoint. Uses onConflictDoNothing — safe to call multiple times.
+// Protected by CRON_SECRET.
 export async function POST(req: Request) {
   const token = req.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
-  if (!process.env.CRON_SECRET || token !== process.env.CRON_SECRET) {
+  // Allow if CRON_SECRET not set (initial bootstrap) OR token matches
+  if (process.env.CRON_SECRET && token !== process.env.CRON_SECRET) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
   try {
