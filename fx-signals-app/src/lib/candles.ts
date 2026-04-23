@@ -346,3 +346,51 @@ export async function fetchCloses4h(pair: CandlePair, count = 60): Promise<numbe
   const candles = await fetchCandles4h(pair, count);
   return candles ? candles.map((c) => c.c) : null;
 }
+
+// ---------------------------------------------------------------------------
+// 1H candles — used for entry-timeframe rejection check (1H/15m per strategy)
+// Reuses the Yahoo 1h route already fetched for 4H aggregation, but returns
+// raw 1H bars. TTL is 15 minutes (much shorter than 4H at 30 min).
+// ---------------------------------------------------------------------------
+
+const cache1h = new Map<string, { at: number; candles: Candle[] }>();
+const TTL_1H_MS = 15 * 60_000;
+
+export async function fetchCandles1h(pair: CandlePair, count = 20): Promise<Candle[] | null> {
+  const key = `1h:${pair}:${count}`;
+  const hit = cache1h.get(key);
+  if (hit && Date.now() - hit.at < TTL_1H_MS) return hit.candles;
+
+  const sym = encodeURIComponent(YAHOO_SYMBOL[pair]);
+  for (const host of YAHOO_HOSTS) {
+    const url = `https://${host}/v8/finance/chart/${sym}?interval=1h&range=5d`;
+    try {
+      const res = await fetchWithTimeout(url, {
+        timeoutMs: 5000,
+        cache: "no-store",
+        headers: YAHOO_HEADERS,
+      });
+      if (res.status === 429) { continue; }
+      if (!res.ok) break;
+      const data = await res.json();
+      const r = data?.chart?.result?.[0];
+      const ts: number[] | undefined = r?.timestamp;
+      const q = r?.indicators?.quote?.[0];
+      if (!ts || !q?.open) break;
+      const candles: Candle[] = [];
+      for (let i = 0; i < ts.length; i++) {
+        const o = q.open[i], h = q.high[i], l = q.low[i], c = q.close[i];
+        if (typeof o === "number" && typeof h === "number" && typeof l === "number" && typeof c === "number") {
+          candles.push({ t: ts[i], o, h, l, c });
+        }
+      }
+      const out = candles.slice(-count);
+      if (out.length >= 5) {
+        cache1h.set(key, { at: Date.now(), candles: out });
+        return out;
+      }
+      break;
+    } catch { /* try next host */ }
+  }
+  return hit?.candles ?? null;
+}

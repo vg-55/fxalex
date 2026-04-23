@@ -43,9 +43,19 @@ export type BuildSignalExtras = {
   dailyEma50?: number | null;
   trendAligned?: boolean;
   rejectionConfirmed?: boolean;
+  /** rejectionConfirmed is now checked on 1H candles in scanner before being passed here */
   newsBlocked?: boolean;
   /** Last N 4H candles — used for momentum scoring */
   candles?: Candle[] | null;
+  /**
+   * EMA-AOI confluence grade (0/1/2):
+   *   2 = 4H EMA-50 is inside the AOI band (full confluence per strategy)
+   *   1 = 4H EMA-50 is within 0.5% of AOI midpoint
+   *   0 = EMA is far from AOI
+   */
+  emaAoiGrade?: 0 | 1 | 2;
+  /** True if price just made a large impulsive move — anti-FOMO gate */
+  isImpulsive?: boolean;
 };
 
 function fmt(n: number, d: number): string {
@@ -96,7 +106,7 @@ export function buildSignal(
 ): EngineSignal {
   const { pair, tvSymbol, timeframe, aoiLow, aoiHigh, ma50, decimals, slBufferPct } = cfg;
   const aoiMid = (aoiLow + aoiHigh) / 2;
-  const { atr: atrValue, dailyEma50, trendAligned, rejectionConfirmed, newsBlocked, candles } = extras;
+  const { atr: atrValue, dailyEma50, trendAligned, rejectionConfirmed, newsBlocked, candles, emaAoiGrade, isImpulsive } = extras;
 
   // ── Direction ──────────────────────────────────────────────────────────────
   const bullishTrend = currentPrice > ma50;
@@ -143,14 +153,20 @@ export function buildSignal(
     : Math.max(0, Math.round(25 * (1 - distancePct / 3)));
 
   // ── Factor 2: EMA Confluence (0–20) ────────────────────────────────────────
-  // Both 4H and Daily EMA-50 agree = 20, 4H only (no daily data) = 10, misaligned = 0
+  // Full strategy: price AND 50 EMA must both be inside/near the AOI.
+  // Grade 2 (EMA inside AOI) = 20pts, grade 1 (EMA near AOI) = 12pts,
+  // grade 0 (EMA far) = 4pts even if direction aligns (partial credit).
+  // If daily and 4H disagree entirely: cap at 4.
   let emaConfluence: number;
   if (trendAligned === false) {
-    emaConfluence = 0; // clear disagreement
-  } else if (dailyEma50 != null && Number.isFinite(dailyEma50)) {
-    emaConfluence = 20; // both TFs confirmed and agree
+    emaConfluence = 0; // TF disagreement — no confluence at all
   } else {
-    emaConfluence = 10; // only 4H available, give partial credit
+    const grade = emaAoiGrade ?? 0;
+    // Base from EMA-in-AOI grade
+    const gradeScore = grade === 2 ? 20 : grade === 1 ? 12 : 4;
+    // Bonus if daily EMA also confirms (both TFs aligned and confirmed)
+    const dailyBonus = (dailyEma50 != null && Number.isFinite(dailyEma50)) ? 0 : -4;
+    emaConfluence = Math.max(0, Math.min(20, gradeScore + dailyBonus));
   }
 
   // ── Factor 3: Rejection (0–20) ─────────────────────────────────────────────
@@ -171,16 +187,22 @@ export function buildSignal(
   const rrQuality = rr >= 3 ? 10 : rr >= 2 ? 7 : rr >= 1.5 ? 4 : 0;
 
   // ── Base score (0–100) ─────────────────────────────────────────────────────
-  // aiBoost = 0 for now; gets added asynchronously via generateAIConfidenceBoost
   const baseScore = proximity + emaConfluence + rejection + momentum + sessionQuality + rrQuality;
   const aiBoost = 0; // placeholder — filled by generateAIConfidenceBoost()
 
-  let aiConfidence = Math.min(100, baseScore + aiBoost);
+  // Anti-FOMO penalty: impulsive moves reduce confidence (no pullback = bad entry)
+  const impulsePenalty = isImpulsive ? 15 : 0;
 
-  // ── Status demotion: ACTIVE requires rejection + no news ───────────────────
+  let aiConfidence = Math.max(0, Math.min(100, baseScore + aiBoost - impulsePenalty));
+
+  // ── Status demotion gates ──────────────────────────────────────────────────
+  // Strategy rule 1: ACTIVE requires rejection candle confirmation
+  // Strategy rule 2: News within 30min → hold off (PENDING)
+  // Strategy rule 3 (anti-FOMO): price just made large impulsive move → PENDING
   if (status === "ACTIVE") {
     if (rejectionConfirmed === false) status = "PENDING";
     if (newsBlocked) status = "PENDING";
+    if (isImpulsive) status = "PENDING"; // anti-FOMO: wait for pullback
   }
 
   const aoi = `${type === "BUY" ? "Support" : "Resistance"} (${fmt(aoiLow, decimals)}–${fmt(aoiHigh, decimals)})`;
@@ -296,25 +318,26 @@ async function callGLM(
  */
 export async function generateAIConfidenceBoost(s: EngineSignal): Promise<number> {
   const decimals = ["XAUUSD", "EURJPY", "CADJPY"].includes(s.pair) ? 2 : 4;
-  const context = `SETUP:
+  const context = `SETUP (FX Alex G Set & Forget methodology):
 Pair: ${s.pair}
 Direction: ${s.type}
 Status: ${s.status}
 Entry: ${s.price.toFixed(decimals)} | SL: ${s.sl.toFixed(decimals)} | TP: ${s.tp.toFixed(decimals)}
 R:R: 1:${s.rr.toFixed(1)}
-AOI: ${s.aoi}
-Trend (50 EMA): ${s.trend}
-4H+Daily aligned: ${s.trendAligned ? "YES" : "NO"}
-Rejection confirmed: ${s.rejectionConfirmed ? "YES" : "NO"}
+AOI zone: ${s.aoi}
+50 EMA trend (4H): ${s.trend}
+4H + Daily EMA aligned: ${s.trendAligned ? "YES" : "NO"}
+50 EMA inside/near AOI: ${s.factors.emaConfluence >= 16 ? "YES (full confluence)" : s.factors.emaConfluence >= 8 ? "NEAR (partial)" : "NO (far from zone)"}
+1H rejection candle: ${s.rejectionConfirmed ? "CONFIRMED" : "NOT YET"}
+Momentum (4H body/ATR): ${s.factors.momentum >= 10 ? "STRONG" : s.factors.momentum >= 5 ? "MODERATE" : "WEAK"}
 Session: ${s.session}
-News blocked: ${s.newsBlocked ? "YES" : "NO"}
+News risk: ${s.newsBlocked ? "YES — blocked" : "NO"}
 Base score: ${s.aiConfidence}/100
 
-Rate this setup 0–15.`;
+Rate this setup quality 0–15. Single integer only.`;
 
   const raw = await callGLM(SCORE_SYSTEM_PROMPT, context, 8, 0.1);
   if (!raw) return 0;
-
   const parsed = parseInt(raw.replace(/\D/g, ""), 10);
   if (!Number.isFinite(parsed)) return 0;
   return Math.max(0, Math.min(15, parsed));
