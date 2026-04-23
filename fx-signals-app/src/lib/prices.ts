@@ -15,7 +15,7 @@ export type PriceBundle = {
   EURUSD: Quote;
   GBPUSD: Quote;
   XAUUSD: Quote;
-  source: "yahoo" | "finnhub" | "twelvedata" | "exchangerate.host" | "alphavantage";
+  source: "yahoo" | "finnhub" | "twelvedata" | "alphavantage";
   fetchedAt: string;
 };
 
@@ -24,38 +24,44 @@ export type PriceBundle = {
 // ---------------------------------------------------------------------------
 
 async function fromYahoo(): Promise<PriceBundle> {
-  const symbols = ["EURUSD=X", "GBPUSD=X", "XAUUSD=X"];
-  const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbols.join(",")}`;
-  const res = await fetch(url, {
-    cache: "no-store",
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
-      Accept: "application/json,text/plain,*/*",
-    },
-  });
-  if (!res.ok) throw new Error(`Yahoo HTTP ${res.status}`);
-  const data = await res.json();
-  const results: Array<Record<string, unknown>> = data?.quoteResponse?.result ?? [];
-  if (!results.length) throw new Error("Yahoo: empty response");
-  const pick = (sym: string): Quote => {
-    const r = results.find((x) => x.symbol === sym);
-    if (!r) throw new Error(`Yahoo: missing ${sym}`);
-    const price = Number(r.regularMarketPrice);
-    if (!Number.isFinite(price)) throw new Error(`Yahoo: invalid ${sym}`);
+  const fetchSymbol = async (sym: string): Promise<Quote> => {
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${sym}?interval=1m&range=1d`;
+    const res = await fetch(url, {
+      cache: "no-store",
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+        Accept: "application/json,text/plain,*/*",
+      },
+    });
+    if (!res.ok) throw new Error(`Yahoo HTTP ${res.status} for ${sym}`);
+    const data = await res.json();
+    const meta = data?.chart?.result?.[0]?.meta;
+    if (!meta || typeof meta.regularMarketPrice !== "number") {
+      throw new Error(`Yahoo invalid meta for ${sym}`);
+    }
+    const price = meta.regularMarketPrice;
+    const prev = meta.previousClose || price;
+    const change = price - prev;
+    const changePercent = prev ? (change / prev) * 100 : undefined;
+
     return {
       price,
-      change: typeof r.regularMarketChange === "number" ? r.regularMarketChange : undefined,
-      changePercent:
-        typeof r.regularMarketChangePercent === "number" ? r.regularMarketChangePercent : undefined,
-      dayHigh: typeof r.regularMarketDayHigh === "number" ? r.regularMarketDayHigh : undefined,
-      dayLow: typeof r.regularMarketDayLow === "number" ? r.regularMarketDayLow : undefined,
+      change,
+      changePercent,
+      dayHigh: meta.regularMarketDayHigh,
+      dayLow: meta.regularMarketDayLow,
     };
   };
+
+  const EURUSD = await fetchSymbol("EURUSD=X");
+  const GBPUSD = await fetchSymbol("GBPUSD=X");
+  const XAUUSD = await fetchSymbol("XAUUSD=X");
+
   return {
-    EURUSD: pick("EURUSD=X"),
-    GBPUSD: pick("GBPUSD=X"),
-    XAUUSD: pick("XAUUSD=X"),
+    EURUSD,
+    GBPUSD,
+    XAUUSD,
     source: "yahoo",
     fetchedAt: new Date().toISOString(),
   };
@@ -116,24 +122,6 @@ async function fromTwelveData(apiKey: string): Promise<PriceBundle> {
   };
 }
 
-async function fromExchangeRateHost(): Promise<PriceBundle> {
-  const url = "https://api.exchangerate.host/latest?base=USD&symbols=EUR,GBP,XAU";
-  const res = await fetch(url, { cache: "no-store" });
-  if (!res.ok) throw new Error(`exchangerate.host HTTP ${res.status}`);
-  const data = await res.json();
-  const e = data?.rates?.EUR;
-  const g = data?.rates?.GBP;
-  const x = data?.rates?.XAU;
-  if (!e || !g || !x) throw new Error("exchangerate.host missing rates");
-  return {
-    EURUSD: { price: 1 / e },
-    GBPUSD: { price: 1 / g },
-    XAUUSD: { price: 1 / x },
-    source: "exchangerate.host",
-    fetchedAt: new Date().toISOString(),
-  };
-}
-
 async function fetchAVRate(from: string, to: string, apiKey: string): Promise<number> {
   const url = `https://www.alphavantage.co/query?function=CURRENCY_EXCHANGE_RATE&from_currency=${from}&to_currency=${to}&apikey=${apiKey}`;
   const res = await fetch(url, { cache: "no-store" });
@@ -181,9 +169,6 @@ export async function fetchLivePrices(): Promise<PriceBundle> {
     catch (e) { errors.push(`twelvedata: ${(e as Error).message}`); }
   }
 
-  try { return await fromExchangeRateHost(); }
-  catch (e) { errors.push(`exchangerate.host: ${(e as Error).message}`); }
-
   const avKey = process.env.ALPHAVANTAGE_API_KEY;
   if (avKey && avKey !== "your_alphavantage_key_here") {
     try { return await fromAlphaVantage(avKey); }
@@ -229,7 +214,6 @@ async function fetchSecondary(): Promise<PriceBundle | null> {
   if (tdKey && tdKey !== "your_twelvedata_key_here") {
     try { return await fromTwelveData(tdKey); } catch { /* fall through */ }
   }
-  try { return await fromExchangeRateHost(); } catch { /* fall through */ }
   return null;
 }
 

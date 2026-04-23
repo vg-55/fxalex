@@ -1,0 +1,33 @@
+# ------------------------------------------------------------------
+# PRICE PROVIDERS (tried in order — first success wins)
+# ------------------------------------------------------------------
+
+# 1. Yahoo Finance — PRIMARY (no key, effectively unlimited, rich data)
+#    Used automatically — nothing to configure.
+
+# 2. Finnhub — 60 req/min free, good quality
+#    Get a key: https://finnhub.io/register
+FINNHUB_API_KEY=d7klaf1r01qiqbcursc0d7klaf1r01qiqbcurscg
+
+# 3. Twelve Data — 8 req/min free
+#    Get a key: https://twelvedata.com/register
+TWELVEDATA_API_KEY=94818175f090464cac926a1faaef2f72
+
+# 4. exchangerate.host — FALLBACK (no key)
+
+# 5. Alpha Vantage — LAST RESORT (25 req/day — throttles fast)
+ALPHAVANTAGE_API_KEY=5BCWA5SBZFF9F4A9
+
+# ------------------------------------------------------------------
+# GLM-5 (OpenAI-compatible endpoint) — AI interpretations
+# ------------------------------------------------------------------
+GLM_API_KEY=sk-1234
+GLM_BASE_URL=http://62.234.148.205:4000/v1
+GLM_MODEL=glm-5
+
+
+
+
+DATABASE_URL=postgresql://neondb_owner:npg_abq9NZouh2Li@ep-green-bonus-am7zx0ah-pooler.c-5.us-east-1.aws.neon.tech/neondb?channel_binding=require&sslmode=require
+
+CRON_SECRET=supersecretcronkey

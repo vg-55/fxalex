@@ -438,8 +438,6 @@ export async function runScanOnce(): Promise<ScanSummary> {
       .delete(schema.priceTicks)
       .where(lt(schema.priceTicks.fetchedAt, new Date(Date.now() - 48 * 3600_000)));
 
-    await releaseScanLock();
-
     return {
       ok: true,
       provider: prices.primary,
@@ -488,8 +486,6 @@ export async function runScanOnce(): Promise<ScanSummary> {
           .returning();
         if (n) pushExternal(n).catch(() => undefined);
       }
-    await releaseScanLock();
-
     }
 
     return {
@@ -501,5 +497,8 @@ export async function runScanOnce(): Promise<ScanSummary> {
       error: message,
       runId: run.id,
     };
+  } finally {
+    // Always release the lock, whether we succeeded or failed
+    await releaseScanLock();
   }
 }
