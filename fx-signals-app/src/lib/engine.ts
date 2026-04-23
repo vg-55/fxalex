@@ -177,7 +177,7 @@ export async function generateAIInterpretation(s: EngineSignal): Promise<string>
     return fallbackInterpretation(s);
   }
 
-  const decimals = s.pair === "XAUUSD" ? 2 : 4;
+  const decimals = ["XAUUSD", "EURJPY", "CADJPY"].includes(s.pair) ? 2 : 4;
   const userMessage = `SIGNAL CONTEXT
 Pair:           ${s.pair}
 Direction:      ${s.type}
@@ -227,7 +227,7 @@ Write the desk commentary.`;
 }
 
 function fallbackInterpretation(s: EngineSignal): string {
-  const decimals = s.pair === "XAUUSD" ? 2 : 4;
+  const decimals = ["XAUUSD", "EURJPY", "CADJPY"].includes(s.pair) ? 2 : 4;
   const emaDesc =
     s.trend === "Bullish"
       ? "price holding above the 50 EMA as dynamic support"

@@ -2,7 +2,28 @@
 
 export type SignalStatus = "ACTIVE" | "PENDING" | "WATCHING";
 export type Session = "Asia" | "London" | "NY" | "London/NY Overlap" | "Off-hours";
-export type Pair = "XAUUSD" | "EURUSD" | "GBPUSD";
+
+export type Pair =
+  | "XAUUSD"
+  | "EURUSD"
+  | "GBPUSD"
+  | "GBPNZD"
+  | "EURJPY"
+  | "CADJPY"
+  | "AUDCAD"
+  | "GBPAUD"
+  | "EURAUD"
+  | "USDCAD"
+  | "USDCHF"
+  | "NZDCAD"
+  | "GBPCHF";
+
+// Pairs that use 2 decimal places (JPY crosses + gold)
+export const TWO_DECIMAL_PAIRS: Pair[] = ["XAUUSD", "EURJPY", "CADJPY"];
+
+export function pairDecimals(pair: string): number {
+  return TWO_DECIMAL_PAIRS.includes(pair as Pair) ? 2 : 4;
+}
 
 export type NewsEvent = {
   id: string;
@@ -80,7 +101,7 @@ export type StreamSignalRow = {
 };
 
 export function rowToSignal(row: StreamSignalRow): Signal {
-  const decimals = row.pair === "XAUUSD" ? 2 : 4;
+  const decimals = pairDecimals(row.pair);
   return {
     id: row.pair,
     pair: row.pair,

@@ -3,7 +3,7 @@
 import { ReactNode, useState, useEffect, useCallback } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Activity, BookOpen, LineChart, LayoutDashboard, Settings as Cog, Wallet } from "lucide-react";
+import { Activity, LineChart, LayoutDashboard, Settings as Cog, Wallet, TrendingUp } from "lucide-react";
 import { LiveStatusProvider, useLiveStatus } from "@/lib/live-status";
 import { AccountProvider, useAccount } from "@/lib/account-context";
 import HealthBadge from "@/components/HealthBadge";
@@ -16,67 +16,47 @@ function StatusDot() {
     idle: { color: "bg-slate-500", pulse: false, label: "Idle" },
     loading: { color: "bg-amber-400", pulse: true, label: "Connecting" },
     ok: { color: "bg-emerald-500", pulse: true, label: "Live" },
-    error: { color: "bg-rose-500", pulse: false, label: "Disconnected" },
+    error: { color: "bg-rose-500", pulse: false, label: "Error" },
   }[status];
   return (
-    <div className="flex items-center gap-2 px-2 py-1.5" title={error ?? map.label}>
-      <span className="relative inline-flex h-2.5 w-2.5">
+    <div className="flex items-center gap-2" title={error ?? map.label}>
+      <span className="relative inline-flex h-2 w-2">
         {map.pulse && (
           <span className={`absolute inline-flex h-full w-full rounded-full ${map.color} opacity-60 animate-ping`} />
         )}
-        <span className={`relative inline-flex h-2.5 w-2.5 rounded-full ${map.color}`} />
+        <span className={`relative inline-flex h-2 w-2 rounded-full ${map.color}`} />
       </span>
-      <span className="text-xs text-slate-400 font-medium">{map.label}</span>
+      <span className="text-xs text-slate-500 font-medium">{map.label}</span>
     </div>
   );
 }
 
-function NavLink({
-  href,
-  icon,
-  label,
-  active,
-}: {
-  href: string;
-  icon: ReactNode;
-  label: string;
-  active: boolean;
-}) {
+function NavLink({ href, icon, label, active }: { href: string; icon: ReactNode; label: string; active: boolean }) {
   return (
     <Link
       href={href}
-      className={`flex items-center gap-3 px-3 py-2.5 rounded-lg transition-colors text-sm ${
+      className={`flex items-center gap-3 px-3 py-2 rounded-lg transition-all text-sm font-medium ${
         active
-          ? "bg-blue-500/15 text-blue-300 border border-blue-500/30"
-          : "text-slate-400 hover:bg-white/5 hover:text-slate-200 border border-transparent"
+          ? "bg-blue-500/10 text-blue-300 border border-blue-500/20"
+          : "text-slate-400 hover:text-white hover:bg-white/5 border border-transparent"
       }`}
     >
-      {icon}
-      <span className="font-medium">{label}</span>
+      <span className={active ? "text-blue-400" : "text-slate-500"}>{icon}</span>
+      {label}
     </Link>
   );
 }
 
-function MobileNavLink({
-  href,
-  icon,
-  label,
-  active,
-}: {
-  href: string;
-  icon: ReactNode;
-  label: string;
-  active: boolean;
-}) {
+function MobileNavLink({ href, icon, label, active }: { href: string; icon: ReactNode; label: string; active: boolean }) {
   return (
     <Link
       href={href}
-      className={`flex-1 flex flex-col items-center justify-center py-2.5 text-[10px] font-semibold ${
-        active ? "text-blue-300" : "text-slate-500"
+      className={`flex-1 flex flex-col items-center justify-center gap-1 py-3 text-[10px] font-semibold uppercase tracking-wide transition-colors ${
+        active ? "text-blue-400" : "text-slate-600 hover:text-slate-400"
       }`}
     >
       {icon}
-      <span className="mt-0.5">{label}</span>
+      {label}
     </Link>
   );
 }
@@ -117,92 +97,91 @@ function Shell({ children }: { children: ReactNode }) {
       const { items } = JSON.parse((ev as MessageEvent).data) as { items: NotificationItem[] };
       setNotifications((prev) => {
         const seen = new Set(prev.map((n) => n.id));
-        const merged = [...items.filter((n) => !seen.has(n.id)), ...prev];
-        return merged.slice(0, 100);
+        return [...items.filter((n) => !seen.has(n.id)), ...prev].slice(0, 100);
       });
     });
     return () => es.close();
   }, [loadNotifications]);
 
   return (
-    <div className="flex min-h-screen bg-[#0a1020] text-slate-200">
-      <aside className="hidden md:flex w-[260px] bg-[#0d1426] border-r border-[#243049] p-4 flex-col">
-        <div className="flex items-center gap-2.5 mb-8 px-2">
-          <div className="p-1.5 rounded-lg bg-blue-500/15 text-blue-400">
-            <Activity size={18} />
+    <div className="flex min-h-screen bg-[#080e1a] text-slate-200">
+      {/* Sidebar */}
+      <aside className="hidden md:flex w-56 bg-[#0a1120] border-r border-white/[0.06] flex-col shrink-0">
+        {/* Logo */}
+        <div className="flex items-center gap-2.5 px-4 py-5 border-b border-white/[0.06]">
+          <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center shrink-0">
+            <TrendingUp size={14} className="text-white" />
           </div>
-          <h1 className="text-[15px] font-black tracking-tight text-white">S&amp;F SIGNALS</h1>
+          <div>
+            <div className="text-[13px] font-black tracking-tight text-white leading-none">S&F SIGNALS</div>
+            <div className="text-[9px] text-slate-500 tracking-widest uppercase mt-0.5">FX Alex G</div>
+          </div>
         </div>
 
-        <nav className="flex-1 space-y-1">
-          <NavLink href="/" icon={<LayoutDashboard size={16} />} label="Live Signals" active={pathname === "/"} />
-          <NavLink
-            href="/performance"
-            icon={<LineChart size={16} />}
-            label="Performance"
-            active={pathname === "/performance"}
-          />
-          <NavLink
-            href="/strategy"
-            icon={<BookOpen size={16} />}
-            label="The Strategy"
-            active={pathname === "/strategy"}
-          />
+        {/* Nav */}
+        <nav className="flex-1 p-3 space-y-0.5">
+          <NavLink href="/" icon={<LayoutDashboard size={15} />} label="Live Signals" active={pathname === "/"} />
+          <NavLink href="/performance" icon={<LineChart size={15} />} label="Performance" active={pathname === "/performance"} />
         </nav>
 
-        <div className="mt-auto pt-4 border-t border-[#243049] space-y-3">
+        {/* Bottom */}
+        <div className="p-3 border-t border-white/[0.06] space-y-2">
           {settings && (
             <button
               onClick={() => setSettingsOpen(true)}
-              className="w-full flex items-center justify-between gap-2 px-3 py-2.5 rounded-lg bg-[#111a2e] border border-[#243049] hover:border-[#2f3d5b] transition text-left"
+              className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-lg bg-white/[0.03] border border-white/[0.06] hover:border-white/10 hover:bg-white/[0.05] transition text-left"
             >
-              <div className="flex items-center gap-2 min-w-0">
-                <Wallet size={14} className="text-emerald-400 shrink-0" />
-                <div className="min-w-0">
-                  <div className="text-[10px] uppercase tracking-wider text-slate-500">Equity</div>
-                  <div className="text-sm font-bold text-white truncate">
-                    {"$"}{settings.equity.toLocaleString()} &middot; {settings.riskPerTradePct}%
-                  </div>
+              <div className="w-6 h-6 rounded-md bg-emerald-500/15 flex items-center justify-center shrink-0">
+                <Wallet size={12} className="text-emerald-400" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="text-[10px] text-slate-500 uppercase tracking-wider">Account</div>
+                <div className="text-xs font-bold text-slate-200 truncate">
+                  ${settings.equity.toLocaleString()} · {settings.riskPerTradePct}%
                 </div>
               </div>
-              <Cog size={14} className="text-slate-500 shrink-0" />
+              <Cog size={13} className="text-slate-600 shrink-0" />
             </button>
           )}
-
-          <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center justify-between px-1">
             <StatusDot />
-            <NotificationCenter items={notifications} onRefresh={loadNotifications} />
+            <div className="flex items-center gap-1.5">
+              <NotificationCenter items={notifications} onRefresh={loadNotifications} />
+            </div>
           </div>
           <HealthBadge />
-          <div className="text-[10px] text-slate-600 px-2 leading-relaxed">
-            Built on FX Alex G Set &amp; Forget
-          </div>
         </div>
       </aside>
 
-      <header className="md:hidden fixed top-0 left-0 right-0 z-40 bg-[#0d1426]/95 backdrop-blur border-b border-[#243049] px-4 py-3 flex items-center justify-between">
+      {/* Mobile top bar */}
+      <header className="md:hidden fixed top-0 left-0 right-0 z-40 bg-[#0a1120]/95 backdrop-blur-md border-b border-white/[0.06] px-4 py-3 flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <Activity size={18} className="text-blue-400" />
-          <span className="text-sm font-black text-white">S&amp;F</span>
+          <div className="w-6 h-6 rounded-md bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center">
+            <Activity size={12} className="text-white" />
+          </div>
+          <span className="text-sm font-black text-white tracking-tight">S&F</span>
         </div>
         <div className="flex items-center gap-2">
           <StatusDot />
           <NotificationCenter items={notifications} onRefresh={loadNotifications} />
           <button
             onClick={() => setSettingsOpen(true)}
-            className="p-1.5 rounded-md text-slate-400 hover:text-white hover:bg-white/5"
+            className="w-7 h-7 rounded-md flex items-center justify-center text-slate-400 hover:text-white hover:bg-white/5 transition"
           >
-            <Cog size={16} />
+            <Cog size={15} />
           </button>
         </div>
       </header>
 
-      <main className="flex-1 min-w-0 overflow-auto pt-14 md:pt-0 pb-16 md:pb-0">{children}</main>
+      {/* Main */}
+      <main className="flex-1 min-w-0 overflow-auto pt-14 md:pt-0 pb-16 md:pb-0">
+        {children}
+      </main>
 
-      <nav className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-[#0d1426]/95 backdrop-blur border-t border-[#243049] flex">
-        <MobileNavLink href="/" icon={<LayoutDashboard size={18} />} label="Live" active={pathname === "/"} />
-        <MobileNavLink href="/performance" icon={<LineChart size={18} />} label="Perf" active={pathname === "/performance"} />
-        <MobileNavLink href="/strategy" icon={<BookOpen size={18} />} label="Docs" active={pathname === "/strategy"} />
+      {/* Mobile bottom nav */}
+      <nav className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-[#0a1120]/95 backdrop-blur-md border-t border-white/[0.06] flex">
+        <MobileNavLink href="/" icon={<LayoutDashboard size={17} />} label="Signals" active={pathname === "/"} />
+        <MobileNavLink href="/performance" icon={<LineChart size={17} />} label="Perf" active={pathname === "/performance"} />
       </nav>
 
       <SettingsDrawer

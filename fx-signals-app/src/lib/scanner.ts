@@ -164,12 +164,13 @@ export async function runScanOnce(): Promise<ScanSummary> {
 
     await refreshNewsIfStale();
 
-    const prices = await fetchLivePricesValidated();
-
     const instruments = await db
       .select()
       .from(schema.instruments)
       .where(eq(schema.instruments.enabled, true));
+
+    const pairNames = instruments.map((inst) => inst.pair);
+    const prices = await fetchLivePricesValidated(pairNames);
 
     type PairEnrichment = {
       ema4h?: number;
@@ -223,7 +224,7 @@ export async function runScanOnce(): Promise<ScanSummary> {
 
     for (const inst of instruments) {
       const pair = inst.pair as CandlePair;
-      const quote = prices[pair];
+      const quote = prices.quotes[pair];
       if (!quote) continue;
 
       const pe = enrich[pair] ?? {};
@@ -404,8 +405,8 @@ export async function runScanOnce(): Promise<ScanSummary> {
     if (prices.anyStale) {
       const allowed = await withCooldown("scanner:feed-stale", "watch");
       if (allowed) {
-        const stalePairs = ["EURUSD", "GBPUSD", "XAUUSD"]
-          .filter((p) => prices[p as CandlePair].isStale)
+        const stalePairs = pairNames
+          .filter((p) => prices.quotes[p]?.isStale)
           .join(", ");
         const [n] = await db
           .insert(schema.notifications)

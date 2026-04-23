@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
-import { AlertTriangle, Maximize2, LineChart, RefreshCw } from "lucide-react";
+import { AlertTriangle, RefreshCw, Activity, TrendingUp, TrendingDown } from "lucide-react";
 import TradingViewWidget from "@/components/TradingViewWidget";
 import SignalCard from "@/components/SignalCard";
 import { useLiveStatus } from "@/lib/live-status";
@@ -13,17 +13,26 @@ type PriceTickRow = { pair: string; price: number };
 
 function SkeletonCard() {
   return (
-    <div className="bg-[#111a2e] border border-[#243049] rounded-2xl p-6 skeleton-shimmer">
-      <div className="h-6 w-32 rounded bg-white/5 mb-4" />
-      <div className="grid grid-cols-3 gap-3 mb-4">
-        <div className="h-16 rounded bg-white/5" />
-        <div className="h-16 rounded bg-white/5" />
-        <div className="h-16 rounded bg-white/5" />
+    <div className="bg-white/[0.02] border border-white/[0.06] rounded-xl p-4 animate-pulse">
+      <div className="flex items-center gap-3 mb-4">
+        <div className="w-8 h-8 rounded-lg bg-white/5" />
+        <div className="flex-1">
+          <div className="h-4 w-20 rounded bg-white/5 mb-1.5" />
+          <div className="h-3 w-28 rounded bg-white/[0.03]" />
+        </div>
+        <div className="h-6 w-16 rounded-full bg-white/5" />
       </div>
-      <div className="h-14 rounded bg-white/5" />
+      <div className="grid grid-cols-3 gap-2 mb-3">
+        <div className="h-12 rounded-lg bg-white/[0.03]" />
+        <div className="h-12 rounded-lg bg-white/[0.03]" />
+        <div className="h-12 rounded-lg bg-white/[0.03]" />
+      </div>
+      <div className="h-10 rounded-lg bg-white/[0.03]" />
     </div>
   );
 }
+
+type FilterTab = "all" | "active" | "pending";
 
 export default function Home() {
   const [signals, setSignals] = useState<Signal[]>([]);
@@ -35,6 +44,7 @@ export default function Home() {
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [now, setNow] = useState<Date>(() => new Date());
   const [activeProvider, setActiveProvider] = useState<string | null>(null);
+  const [filter, setFilter] = useState<FilterTab>("all");
   const { setStatus } = useLiveStatus();
   const { settings } = useAccount();
   const mountedRef = useRef(true);
@@ -47,7 +57,7 @@ export default function Home() {
     const pulse = () => {
       setIsRefreshing(true);
       if (pulseTimer) clearTimeout(pulseTimer);
-      pulseTimer = setTimeout(() => setIsRefreshing(false), 500);
+      pulseTimer = setTimeout(() => setIsRefreshing(false), 600);
     };
 
     es.addEventListener("signals", (ev) => {
@@ -112,148 +122,164 @@ export default function Home() {
     if (!settings) return {};
     const out: Record<string, { lots: string; pips: number; risk: number }> = {};
     for (const s of signals) {
-      const sz = computeSize({
-        pair: s.pair,
-        equity: settings.equity,
-        riskPct: settings.riskPerTradePct,
-        entry: parseFloat(s.price),
-        sl: parseFloat(s.sl),
-      });
-      out[s.pair] = { lots: sz.displayLots, pips: sz.pipsRisked, risk: sz.riskDollars };
+      try {
+        const sz = computeSize({
+          pair: s.pair,
+          equity: settings.equity,
+          riskPct: settings.riskPerTradePct,
+          entry: parseFloat(s.price),
+          sl: parseFloat(s.sl),
+        });
+        out[s.pair] = { lots: sz.displayLots, pips: sz.pipsRisked, risk: sz.riskDollars };
+      } catch {}
     }
     return out;
   }, [signals, settings]);
 
   const relativeTime = (from: Date): string => {
-    const seconds = Math.max(0, Math.floor((now.getTime() - from.getTime()) / 1000));
-    if (seconds < 5) return "just now";
-    if (seconds < 60) return `${seconds}s ago`;
-    const mins = Math.floor(seconds / 60);
-    if (mins < 60) return `${mins}m ago`;
-    return `${Math.floor(mins / 60)}h ago`;
+    const s = Math.max(0, Math.floor((now.getTime() - from.getTime()) / 1000));
+    if (s < 5) return "just now";
+    if (s < 60) return `${s}s ago`;
+    const m = Math.floor(s / 60);
+    if (m < 60) return `${m}m ago`;
+    return `${Math.floor(m / 60)}h ago`;
   };
 
-  return (
-    <div className="p-4 sm:p-6 lg:p-8 max-w-[1600px] mx-auto flex flex-col xl:flex-row gap-6 lg:gap-8">
-      <div className="flex-1 min-w-0 xl:max-w-[780px]">
-        <header className="mb-6 flex flex-col sm:flex-row justify-between items-start sm:items-end gap-4">
-          <div>
-            <h1 className="text-2xl sm:text-3xl font-black text-white mb-1.5 tracking-tight">
-              Live Trading Signals
-            </h1>
-            <p className="text-sm text-slate-400">
-              Set &amp; Forget methodology · 4H AOI · 50 EMA · 1:2+ R:R
-            </p>
-          </div>
-          <div className="flex gap-3">
-            <Stat label="Active" value={activeCount} tone="active" />
-            <Stat label="Pending" value={pendingCount} tone="pending" />
-            {settings && (
-              <Stat label="Equity" value={`$${settings.equity.toLocaleString()}`} tone="neutral" />
-            )}
-          </div>
-        </header>
+  const filteredSignals = useMemo(() => {
+    if (filter === "active") return signals.filter((s) => s.status === "ACTIVE");
+    if (filter === "pending") return signals.filter((s) => s.status === "PENDING");
+    return signals;
+  }, [signals, filter]);
 
-        <div className="mb-5 flex items-center justify-between text-xs text-slate-400 bg-[#111a2e]/70 border border-[#243049] rounded-lg px-3 sm:px-4 py-2">
-          <div className="flex items-center gap-3">
-            <RefreshCw
-              size={13}
-              className={isRefreshing ? "animate-spin text-blue-400" : "text-slate-500"}
-            />
-            <span>
-              {lastUpdated ? `Last scan ${relativeTime(lastUpdated)}` : "Waiting for first scan…"}
-            </span>
+  const sortedSignals = useMemo(() => {
+    return [...filteredSignals].sort((a, b) => {
+      const order = { ACTIVE: 0, PENDING: 1, WATCHING: 2 };
+      if (order[a.status] !== order[b.status]) return order[a.status] - order[b.status];
+      return b.aiConfidence - a.aiConfidence;
+    });
+  }, [filteredSignals]);
+
+  return (
+    <div className="flex h-full min-h-screen">
+      {/* Signals panel */}
+      <div className="flex-1 min-w-0 flex flex-col">
+        {/* Page header */}
+        <div className="sticky top-0 z-20 bg-[#080e1a]/90 backdrop-blur-md border-b border-white/[0.06] px-4 sm:px-6 py-3">
+          <div className="flex items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <h1 className="text-sm font-bold text-white">Live Signals</h1>
+              {/* Stats pills */}
+              <div className="hidden sm:flex items-center gap-1.5">
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-blue-500/10 border border-blue-500/20 text-blue-300 text-xs font-semibold">
+                  <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />
+                  {activeCount} Active
+                </span>
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-amber-500/10 border border-amber-500/20 text-amber-300 text-xs font-semibold">
+                  {pendingCount} Pending
+                </span>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 text-xs text-slate-500">
+              <RefreshCw
+                size={11}
+                className={isRefreshing ? "animate-spin text-blue-400" : "text-slate-600"}
+              />
+              <span className="hidden sm:inline">
+                {lastUpdated ? relativeTime(lastUpdated) : "waiting…"}
+              </span>
+              {activeProvider && (
+                <span className="hidden sm:inline font-mono text-slate-600">· {activeProvider}</span>
+              )}
+            </div>
           </div>
-          <span className="font-mono text-slate-500">
-            {activeProvider ? `live · ${activeProvider}` : "live"}
-          </span>
+
+          {/* Filter tabs */}
+          <div className="flex items-center gap-1 mt-2.5">
+            {(["all", "active", "pending"] as FilterTab[]).map((tab) => (
+              <button
+                key={tab}
+                onClick={() => setFilter(tab)}
+                className={`px-3 py-1 rounded-md text-xs font-medium capitalize transition-colors ${
+                  filter === tab
+                    ? "bg-white/[0.08] text-white"
+                    : "text-slate-500 hover:text-slate-300 hover:bg-white/[0.04]"
+                }`}
+              >
+                {tab === "all" ? `All (${signals.length})` : tab === "active" ? `Active (${activeCount})` : `Pending (${pendingCount})`}
+              </button>
+            ))}
+          </div>
         </div>
 
+        {/* Error */}
         {error && (
-          <div className="bg-rose-500/10 border border-rose-500/30 rounded-xl p-3 mb-5 flex items-start gap-3 anim-fade-in-up">
-            <AlertTriangle className="text-rose-400 shrink-0 mt-0.5" size={16} />
-            <div className="flex-1">
-              <p className="text-rose-200 text-sm">{error}</p>
-            </div>
+          <div className="mx-4 sm:mx-6 mt-4 bg-rose-500/8 border border-rose-500/20 rounded-xl p-3 flex items-center gap-3">
+            <AlertTriangle className="text-rose-400 shrink-0" size={15} />
+            <p className="text-rose-300 text-xs flex-1">{error}</p>
             <button
               onClick={() => location.reload()}
-              className="px-2.5 py-1 rounded-md text-xs font-medium bg-rose-500/20 text-rose-200 border border-rose-500/30 hover:bg-rose-500/30 transition"
+              className="text-xs px-2.5 py-1 rounded-md bg-rose-500/15 text-rose-300 border border-rose-500/25 hover:bg-rose-500/20 transition"
             >
               Reload
             </button>
           </div>
         )}
 
-        <div className="space-y-4">
-          {isLoading && signals.length === 0 ? (
-            <>
-              <SkeletonCard />
-              <SkeletonCard />
-              <SkeletonCard />
-            </>
-          ) : (
-            signals.map((signal) => (
-              <SignalCard
-                key={signal.id}
-                signal={signal}
-                isCharted={activeChartSymbol === signal.tvSymbol}
-                isRefreshing={isRefreshing}
-                now={now}
-                sparklineData={sparklines[signal.pair]}
-                positionSize={sizing[signal.pair]}
-                onSelect={() => setActiveChartSymbol(signal.tvSymbol)}
-              />
-            ))
-          )}
-        </div>
-      </div>
-
-      <div className="xl:w-[500px] 2xl:w-[600px] shrink-0 xl:sticky xl:top-6 xl:h-[calc(100vh-3rem)] bg-[#111a2e] border border-[#243049] rounded-2xl overflow-hidden flex-col hidden lg:flex">
-        <div className="p-3.5 border-b border-[#243049] bg-[#0a1020] flex justify-between items-center">
-          <h2 className="text-white font-bold flex items-center gap-2 text-sm">
-            <LineChart size={16} className="text-blue-400" />
-            Live Charting
-          </h2>
-          <div className="text-[11px] text-slate-400 font-mono">{activeChartSymbol}</div>
-        </div>
-        <div className="flex-1 bg-[#111a2e] relative min-h-[400px]">
-          <TradingViewWidget symbol={activeChartSymbol} />
-          <div className="absolute top-3 left-3 pointer-events-none bg-[#0a1020]/90 backdrop-blur border border-[#243049] rounded-md p-2.5 text-[10px] text-slate-300 shadow-xl max-w-[180px]">
-            <strong className="text-white block mb-1 flex items-center gap-1">
-              <Maximize2 size={10} /> Checklist
-            </strong>
-            <ul className="space-y-0.5 text-slate-400">
-              <li>&#10003; AOI pullback</li>
-              <li>&#10003; 50 EMA confluence</li>
-              <li>&#10003; Rejection candle</li>
-              <li>&#10003; 1:2+ R:R</li>
-            </ul>
+        {/* Signal grid */}
+        <div className="flex-1 p-4 sm:p-6">
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2 gap-3">
+            {isLoading && signals.length === 0 ? (
+              Array.from({ length: 6 }).map((_, i) => <SkeletonCard key={i} />)
+            ) : sortedSignals.length === 0 ? (
+              <div className="col-span-full flex flex-col items-center justify-center py-20 text-center">
+                <Activity size={32} className="text-slate-700 mb-3" />
+                <p className="text-slate-500 text-sm">No signals match this filter</p>
+              </div>
+            ) : (
+              sortedSignals.map((signal) => (
+                <SignalCard
+                  key={signal.id}
+                  signal={signal}
+                  isCharted={activeChartSymbol === signal.tvSymbol}
+                  isRefreshing={isRefreshing}
+                  now={now}
+                  sparklineData={sparklines[signal.pair]}
+                  positionSize={sizing[signal.pair]}
+                  onSelect={() => setActiveChartSymbol(signal.tvSymbol)}
+                />
+              ))
+            )}
           </div>
         </div>
       </div>
-    </div>
-  );
-}
 
-function Stat({
-  label,
-  value,
-  tone,
-}: {
-  label: string;
-  value: number | string;
-  tone: "active" | "pending" | "neutral";
-}) {
-  const toneCls =
-    tone === "active"
-      ? "text-blue-300 border-blue-500/30 bg-blue-500/5"
-      : tone === "pending"
-      ? "text-amber-300 border-amber-500/30 bg-amber-500/5"
-      : "text-slate-200 border-[#243049] bg-[#111a2e]";
-  return (
-    <div className={`border rounded-lg px-3 py-2 text-center min-w-[88px] ${toneCls}`}>
-      <div className="text-[10px] uppercase tracking-wider text-slate-500 mb-0.5">{label}</div>
-      <div className="text-lg font-bold font-mono">{value}</div>
+      {/* Chart panel — desktop only */}
+      <div className="hidden xl:flex w-[480px] 2xl:w-[560px] shrink-0 flex-col border-l border-white/[0.06] sticky top-0 h-screen">
+        {/* Chart header */}
+        <div className="flex items-center justify-between px-4 py-3 border-b border-white/[0.06] bg-[#0a1120]">
+          <div className="flex items-center gap-2">
+            <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+            <span className="text-xs font-semibold text-slate-300">Live Chart</span>
+          </div>
+          <span className="text-xs font-mono text-slate-500">{activeChartSymbol}</span>
+        </div>
+        {/* Chart */}
+        <div className="flex-1 relative">
+          <TradingViewWidget symbol={activeChartSymbol} />
+        </div>
+        {/* Checklist overlay */}
+        <div className="px-4 py-3 border-t border-white/[0.06] bg-[#0a1120]">
+          <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-1.5">Entry Checklist</div>
+          <div className="grid grid-cols-2 gap-1">
+            {["AOI pullback", "50 EMA confluence", "Rejection candle", "1:2+ R:R"].map((item) => (
+              <div key={item} className="flex items-center gap-1.5 text-[11px] text-slate-400">
+                <span className="w-1 h-1 rounded-full bg-emerald-500/70" />
+                {item}
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

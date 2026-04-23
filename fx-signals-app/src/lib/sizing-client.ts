@@ -8,8 +8,14 @@ export type SizingInput = {
 };
 
 function pipSize(pair: string): number {
-  if (pair === "XAUUSD") return 0.1;
-  return 0.0001;
+  if (pair === "XAUUSD") return 0.1;      // gold: 1 pip = $0.10
+  if (pair.endsWith("JPY")) return 0.01;  // JPY crosses: 1 pip = 0.01
+  return 0.0001;                           // standard FX
+}
+
+function lotUnit(pair: string): number {
+  if (pair === "XAUUSD") return 100;      // 1 lot = 100 oz
+  return 100_000;                          // standard FX
 }
 
 export function computeSize(input: SizingInput) {
@@ -20,8 +26,7 @@ export function computeSize(input: SizingInput) {
     return { riskDollars, slDistance, units: 0, lots: 0, displayLots: "0.00", pipsRisked: 0 };
   }
   const units = riskDollars / slDistance;
-  const lotUnit = pair === "XAUUSD" ? 100 : 100_000;
-  const lots = units / lotUnit;
+  const lots = units / lotUnit(pair);
   const pipsRisked = slDistance / pipSize(pair);
   return {
     riskDollars,

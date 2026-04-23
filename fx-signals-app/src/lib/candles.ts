@@ -2,7 +2,11 @@
 // Primary: IBR Live (FX only). Fallbacks: Yahoo chart, then Twelve Data.
 
 export type Candle = { t: number; o: number; h: number; l: number; c: number };
-export type CandlePair = "XAUUSD" | "EURUSD" | "GBPUSD";
+export type CandlePair =
+  | "XAUUSD" | "EURUSD" | "GBPUSD"
+  | "GBPNZD" | "EURJPY" | "CADJPY"
+  | "AUDCAD" | "GBPAUD" | "EURAUD"
+  | "USDCAD" | "USDCHF" | "NZDCAD" | "GBPCHF";
 
 const YAHOO_SYMBOL: Record<CandlePair, string> = {
   // `XAUUSD=X` is delisted on Yahoo (404). `GC=F` is COMEX front-month gold
@@ -10,18 +14,40 @@ const YAHOO_SYMBOL: Record<CandlePair, string> = {
   XAUUSD: "GC=F",
   EURUSD: "EURUSD=X",
   GBPUSD: "GBPUSD=X",
+  GBPNZD: "GBPNZD=X",
+  EURJPY: "EURJPY=X",
+  CADJPY: "CADJPY=X",
+  AUDCAD: "AUDCAD=X",
+  GBPAUD: "GBPAUD=X",
+  EURAUD: "EURAUD=X",
+  USDCAD: "USDCAD=X",
+  USDCHF: "USDCHF=X",
+  NZDCAD: "NZDCAD=X",
+  GBPCHF: "GBPCHF=X",
 };
 
 const TD_SYMBOL: Record<CandlePair, string> = {
   XAUUSD: "XAU/USD",
   EURUSD: "EUR/USD",
   GBPUSD: "GBP/USD",
+  GBPNZD: "GBP/NZD",
+  EURJPY: "EUR/JPY",
+  CADJPY: "CAD/JPY",
+  AUDCAD: "AUD/CAD",
+  GBPAUD: "GBP/AUD",
+  EURAUD: "EUR/AUD",
+  USDCAD: "USD/CAD",
+  USDCHF: "USD/CHF",
+  NZDCAD: "NZD/CAD",
+  GBPCHF: "GBP/CHF",
 };
 
-// IBR Live only covers FX pairs (no gold).
+// IBR Live covers these FX pairs (no gold)
 const IBR_SYMBOL: Partial<Record<CandlePair, string>> = {
-  EURUSD: "EURUSD",
-  GBPUSD: "GBPUSD",
+  EURUSD: "EURUSD", GBPUSD: "GBPUSD", GBPNZD: "GBPNZD",
+  EURJPY: "EURJPY", CADJPY: "CADJPY", AUDCAD: "AUDCAD",
+  GBPAUD: "GBPAUD", EURAUD: "EURAUD", USDCAD: "USDCAD",
+  USDCHF: "USDCHF", NZDCAD: "NZDCAD", GBPCHF: "GBPCHF",
 };
 
 const IBR_BASE = "https://api.ibrlive.com/api";
