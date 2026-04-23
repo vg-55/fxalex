@@ -69,35 +69,47 @@ async function ibrGet<T>(path: string, apiKey: string, timeoutMs = 6000): Promis
   return data;
 }
 
-/** Fetches a single Yahoo symbol via the v8 chart endpoint (matches fromYahoo). */
+const YAHOO_HOSTS = ["query1.finance.yahoo.com", "query2.finance.yahoo.com"];
+
+/** Fetches a single Yahoo symbol via the v8 chart endpoint (matches fromYahoo).
+ *  Tries query1 first; on 429 or network error falls over to query2. */
 async function yahooChartQuote(sym: string): Promise<Quote> {
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${sym}?interval=1m&range=1d`;
-  const res = await fetchWithTimeout(url, {
-    timeoutMs: 5000,
-    cache: "no-store",
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
-      Accept: "application/json,text/plain,*/*",
-    },
-  });
-  if (!res.ok) throw new Error(`Yahoo HTTP ${res.status} for ${sym}`);
-  const data = await res.json();
-  const meta = data?.chart?.result?.[0]?.meta;
-  if (!meta || typeof meta.regularMarketPrice !== "number") {
-    throw new Error(`Yahoo invalid meta for ${sym}`);
-  }
-  const price = meta.regularMarketPrice;
-  const prev = meta.previousClose || price;
-  const change = price - prev;
-  const changePercent = prev ? (change / prev) * 100 : undefined;
-  return {
-    price,
-    change,
-    changePercent,
-    dayHigh: meta.regularMarketDayHigh,
-    dayLow: meta.regularMarketDayLow,
+  const headers = {
+    "User-Agent":
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+    Accept: "application/json,text/plain,*/*",
   };
+  const errors: string[] = [];
+  for (const host of YAHOO_HOSTS) {
+    const url = `https://${host}/v8/finance/chart/${sym}?interval=1m&range=1d`;
+    try {
+      const res = await fetchWithTimeout(url, { timeoutMs: 5000, cache: "no-store", headers });
+      if (res.status === 429) {
+        errors.push(`${host}: 429`);
+        continue; // try next host
+      }
+      if (!res.ok) throw new Error(`Yahoo HTTP ${res.status} for ${sym}`);
+      const data = await res.json();
+      const meta = data?.chart?.result?.[0]?.meta;
+      if (!meta || typeof meta.regularMarketPrice !== "number") {
+        throw new Error(`Yahoo invalid meta for ${sym}`);
+      }
+      const price = meta.regularMarketPrice;
+      const prev = meta.previousClose || price;
+      const change = price - prev;
+      const changePercent = prev ? (change / prev) * 100 : undefined;
+      return {
+        price,
+        change,
+        changePercent,
+        dayHigh: meta.regularMarketDayHigh,
+        dayLow: meta.regularMarketDayLow,
+      };
+    } catch (e) {
+      errors.push(`${host}: ${(e as Error).message}`);
+    }
+  }
+  throw new Error(`Yahoo ${sym} unavailable: ${errors.join(" | ")}`);
 }
 
 function ibrBuildQuote(tick: IbrSnapshotQuote, prev: IbrPrevClose | null): Quote {
@@ -166,7 +178,7 @@ async function fetchXauusdViaCascade(): Promise<Quote> {
 }
 
 async function fromIbrLive(apiKey: string): Promise<PriceBundle> {
-  const [snapshot, prevEUR, prevGBP, xau] = await Promise.all([
+  const [snapshot, prevEUR, prevGBP, xauResult] = await Promise.all([
     ibrGet<IbrSnapshotResponse>("/forex/snapshot", apiKey),
     ibrGet<IbrPrevCloseResponse>("/forex/previous-close?symbol=EURUSD", apiKey).catch(
       () => null as IbrPrevCloseResponse | null
@@ -174,7 +186,11 @@ async function fromIbrLive(apiKey: string): Promise<PriceBundle> {
     ibrGet<IbrPrevCloseResponse>("/forex/previous-close?symbol=GBPUSD", apiKey).catch(
       () => null as IbrPrevCloseResponse | null
     ),
-    fetchXauusdViaCascade(),
+    // XAUUSD is optional — a gold-only failure must NOT kill the EUR/GBP feed.
+    fetchXauusdViaCascade().catch((e: unknown) => {
+      console.warn("[prices:ibrlive] XAUUSD cascade failed:", (e as Error).message);
+      return null as Quote | null;
+    }),
   ]);
 
   const quotes: IbrSnapshotQuote[] = snapshot.lastQuotes ?? [];
@@ -182,6 +198,11 @@ async function fromIbrLive(apiKey: string): Promise<PriceBundle> {
   const gbpTick = quotes.find((q) => q.s === "GBPUSD");
   if (!eurTick) throw new Error("IBR Live: missing EURUSD in snapshot");
   if (!gbpTick) throw new Error("IBR Live: missing GBPUSD in snapshot");
+
+  // If all gold providers failed, use a sentinel that marks XAUUSD as unavailable.
+  // The scanner will receive isStale=true for XAUUSD via cross-validation and
+  // will demote any XAUUSD signal to PENDING rather than crashing entirely.
+  const xau: Quote = xauResult ?? { price: 0 };
 
   return {
     EURUSD: ibrBuildQuote(eurTick, prevEUR?.data ?? null),

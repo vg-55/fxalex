@@ -140,51 +140,60 @@ async function ibrLiveDaily(pair: CandlePair): Promise<number[] | null> {
   return closes.length >= 50 ? closes : null;
 }
 
+const YAHOO_HOSTS = ["query1.finance.yahoo.com", "query2.finance.yahoo.com"];
+
+const YAHOO_HEADERS = {
+  "User-Agent":
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+  Accept: "application/json,text/plain,*/*",
+};
+
 async function yahoo4h(pair: CandlePair, count: number): Promise<Candle[] | null> {
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
-    YAHOO_SYMBOL[pair]
-  )}?interval=1h&range=3mo`;
-  try {
-    const res = await fetchWithTimeout(url, {
-      timeoutMs: 5000,
-      cache: "no-store",
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
-        Accept: "application/json,text/plain,*/*",
-      },
-    });
-    if (!res.ok) {
-      console.warn(`[candles:yahoo:4h] ${pair} HTTP ${res.status}`);
-      return null;
-    }
-    const data = await res.json();
-    const r = data?.chart?.result?.[0];
-    const ts: number[] | undefined = r?.timestamp;
-    const q = r?.indicators?.quote?.[0];
-    const o: (number | null)[] | undefined = q?.open;
-    const h: (number | null)[] | undefined = q?.high;
-    const l: (number | null)[] | undefined = q?.low;
-    const c: (number | null)[] | undefined = q?.close;
-    if (!ts || !o || !h || !l || !c) return null;
-    const hourly: Candle[] = [];
-    for (let i = 0; i < ts.length; i++) {
-      if (
-        typeof o[i] === "number" &&
-        typeof h[i] === "number" &&
-        typeof l[i] === "number" &&
-        typeof c[i] === "number"
-      ) {
-        hourly.push({ t: ts[i], o: o[i]!, h: h[i]!, l: l[i]!, c: c[i]! });
+  const sym = encodeURIComponent(YAHOO_SYMBOL[pair]);
+  for (const host of YAHOO_HOSTS) {
+    const url = `https://${host}/v8/finance/chart/${sym}?interval=1h&range=3mo`;
+    try {
+      const res = await fetchWithTimeout(url, {
+        timeoutMs: 5000,
+        cache: "no-store",
+        headers: YAHOO_HEADERS,
+      });
+      if (res.status === 429) {
+        console.warn(`[candles:yahoo:4h] ${pair} 429 on ${host}, trying next`);
+        continue;
       }
+      if (!res.ok) {
+        console.warn(`[candles:yahoo:4h] ${pair} HTTP ${res.status} on ${host}`);
+        return null;
+      }
+      const data = await res.json();
+      const r = data?.chart?.result?.[0];
+      const ts: number[] | undefined = r?.timestamp;
+      const q = r?.indicators?.quote?.[0];
+      const o: (number | null)[] | undefined = q?.open;
+      const h: (number | null)[] | undefined = q?.high;
+      const l: (number | null)[] | undefined = q?.low;
+      const c: (number | null)[] | undefined = q?.close;
+      if (!ts || !o || !h || !l || !c) return null;
+      const hourly: Candle[] = [];
+      for (let i = 0; i < ts.length; i++) {
+        if (
+          typeof o[i] === "number" &&
+          typeof h[i] === "number" &&
+          typeof l[i] === "number" &&
+          typeof c[i] === "number"
+        ) {
+          hourly.push({ t: ts[i], o: o[i]!, h: h[i]!, l: l[i]!, c: c[i]! });
+        }
+      }
+      const fourH = aggregate1hTo4h(hourly);
+      const out = fourH.slice(-count);
+      return out.length >= 50 ? out : null;
+    } catch (e) {
+      console.warn(`[candles:yahoo:4h] ${pair} failed on ${host}:`, (e as Error).message);
     }
-    const fourH = aggregate1hTo4h(hourly);
-    const out = fourH.slice(-count);
-    return out.length >= 50 ? out : null;
-  } catch (e) {
-    console.warn(`[candles:yahoo:4h] ${pair} failed:`, (e as Error).message);
-    return null;
   }
+  return null;
 }
 
 async function twelveData4h(pair: CandlePair, count: number): Promise<Candle[] | null> {
@@ -240,29 +249,31 @@ export async function fetchCandles4h(pair: CandlePair, count = 60): Promise<Cand
 }
 
 async function yahooDaily(pair: CandlePair): Promise<number[] | null> {
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
-    YAHOO_SYMBOL[pair]
-  )}?interval=1d&range=1y`;
-  try {
-    const res = await fetchWithTimeout(url, {
-      timeoutMs: 5000,
-      cache: "no-store",
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
-        Accept: "application/json,text/plain,*/*",
-      },
-    });
-    if (!res.ok) return null;
-    const data = await res.json();
-    const closes: (number | null)[] | undefined =
-      data?.chart?.result?.[0]?.indicators?.quote?.[0]?.close;
-    if (!closes) return null;
-    const clean = closes.filter((c): c is number => typeof c === "number");
-    return clean.length >= 50 ? clean : null;
-  } catch {
-    return null;
+  const sym = encodeURIComponent(YAHOO_SYMBOL[pair]);
+  for (const host of YAHOO_HOSTS) {
+    const url = `https://${host}/v8/finance/chart/${sym}?interval=1d&range=1y`;
+    try {
+      const res = await fetchWithTimeout(url, {
+        timeoutMs: 5000,
+        cache: "no-store",
+        headers: YAHOO_HEADERS,
+      });
+      if (res.status === 429) {
+        console.warn(`[candles:yahoo:daily] ${pair} 429 on ${host}, trying next`);
+        continue;
+      }
+      if (!res.ok) return null;
+      const data = await res.json();
+      const closes: (number | null)[] | undefined =
+        data?.chart?.result?.[0]?.indicators?.quote?.[0]?.close;
+      if (!closes) return null;
+      const clean = closes.filter((c): c is number => typeof c === "number");
+      return clean.length >= 50 ? clean : null;
+    } catch {
+      // try next host
+    }
   }
+  return null;
 }
 
 async function twelveDataDaily(pair: CandlePair): Promise<number[] | null> {

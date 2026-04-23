@@ -15,6 +15,7 @@ export type HealthReport = {
     consecutiveFailures: number;
     activeProvider: string | null;
     backoffUntil: string | null;
+    lastError: string | null;
   };
   db: {
     ok: boolean;
@@ -87,6 +88,7 @@ export async function GET() {
       backoffUntil: scannerState?.backoffUntil
         ? new Date(scannerState.backoffUntil).toISOString()
         : null,
+      lastError: scannerState?.lastError ?? null,
     },
     db: { ok: dbOk, latencyMs: dbLatency, error: dbError },
     notifications: { unreadCount },
