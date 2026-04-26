@@ -53,6 +53,10 @@ function getTickSize(pair: string) {
   return 0.0001; // Standard forex pip
 }
 
+// In-memory cache for AI interpretations so it doesn't randomly change on every refresh
+// when the market state hasn't meaningfully changed.
+const aiCache = new Map<string, { interpretation: string; score: number }>();
+
 export async function getFabioAnalysis(pair: CandlePair): Promise<FabioAnalysis | null> {
   assertDb();
   
@@ -236,9 +240,18 @@ export async function getFabioAnalysis(pair: CandlePair): Promise<FabioAnalysis 
   // Add AI Analysis Layer
   try {
     const decimals = pair.includes("JPY") ? 3 : 5;
-    const sysPrompt = "You are Fabio, an elite order flow and tape reader. You trade exclusively via 40-Range charts and Volume Profile (Auction Market Theory). Analyze the provided state, determine if it's a high probability setup based on the 'Triple-A' 80% rule or Absorption & Squeeze. Respond with a sharp, professional desk commentary analyzing the setup (max 4 sentences). End your response with a confidence score on a new line formatted exactly as: [SCORE: X/100].";
     
-    const userMsg = `PAIR: ${pair}
+    // Create a deterministic cache key based on the exact mechanical state
+    const stateKey = `${pair}_${currentPrice.toFixed(decimals)}_${vah.toFixed(decimals)}_${poc.toFixed(decimals)}_${val.toFixed(decimals)}_${cvd}_${lastCandle.isUp}_${signal}`;
+    
+    if (aiCache.has(stateKey)) {
+      const cached = aiCache.get(stateKey)!;
+      aiInterpretation = cached.interpretation;
+      aiConfidenceScore = cached.score;
+    } else {
+      const sysPrompt = "You are Fabio, an elite order flow and tape reader. You trade exclusively via 40-Range charts and Volume Profile (Auction Market Theory). Analyze the provided state, determine if it's a high probability setup based on the 'Triple-A' 80% rule or Absorption & Squeeze. Respond with a sharp, professional desk commentary analyzing the setup (max 4 sentences). End your response with a confidence score on a new line formatted exactly as: [SCORE: X/100].";
+      
+      const userMsg = `PAIR: ${pair}
 CURRENT PRICE: ${currentPrice.toFixed(decimals)}
 VALUE AREA HIGH (VAH): ${vah.toFixed(decimals)}
 POINT OF CONTROL (POC): ${poc.toFixed(decimals)}
@@ -249,16 +262,24 @@ INSIDE VALUE AREA: ${isInsideValueArea ? 'YES' : 'NO'}
 MECHANICAL SIGNAL: ${signal}
 MECHANICAL REASONING: ${reasoning}`;
 
-    const aiRes = await callGLM(sysPrompt, userMsg, 600, 0.25);
-    
-    if (aiRes) {
-      // Extract score
-      const scoreMatch = aiRes.match(/\[SCORE:\s*(\d+)\/100\]/i);
-      if (scoreMatch && scoreMatch[1]) {
-        aiConfidenceScore = parseInt(scoreMatch[1], 10);
+      const aiRes = await callGLM(sysPrompt, userMsg, 600, 0.25);
+      
+      if (aiRes) {
+        // Extract score
+        const scoreMatch = aiRes.match(/\[SCORE:\s*(\d+)\/100\]/i);
+        if (scoreMatch && scoreMatch[1]) {
+          aiConfidenceScore = parseInt(scoreMatch[1], 10);
+        }
+        // Remove score from the text for the interpretation
+        aiInterpretation = aiRes.replace(/\[SCORE:\s*\d+\/100\]/i, '').trim();
+        
+        if (aiInterpretation && aiConfidenceScore !== undefined) {
+          // Store in cache to keep it stable until the state changes
+          aiCache.set(stateKey, { interpretation: aiInterpretation, score: aiConfidenceScore });
+          // Optional: clear cache if it gets too large
+          if (aiCache.size > 1000) aiCache.clear();
+        }
       }
-      // Remove score from the text for the interpretation
-      aiInterpretation = aiRes.replace(/\[SCORE:\s*\d+\/100\]/i, '').trim();
     }
   } catch (e) {
     console.error("Fabio AI generation failed", e);
