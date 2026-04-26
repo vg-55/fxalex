@@ -291,7 +291,7 @@ export function buildSignal(
 // GLM calls — shared helper
 // ---------------------------------------------------------------------------
 
-async function callGLM(
+export async function callGLM(
   systemPrompt: string,
   userMessage: string,
   maxTokens: number,
@@ -309,7 +309,7 @@ async function callGLM(
 
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8000);
+    const timeout = setTimeout(() => controller.abort(), 20000); // Increased timeout to 20s for reasoning models
     const res = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },

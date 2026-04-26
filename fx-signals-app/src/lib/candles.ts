@@ -6,7 +6,7 @@ export type CandlePair =
   | "XAUUSD" | "EURUSD" | "GBPUSD"
   | "GBPNZD" | "EURJPY" | "CADJPY"
   | "AUDCAD" | "GBPAUD" | "EURAUD"
-  | "USDCAD" | "USDCHF" | "NZDCAD" | "GBPCHF";
+  | "USDCAD" | "USDCHF" | "NZDCAD" | "GBPCHF" | "USDJPY" | "AUDUSD";
 
 const YAHOO_SYMBOL: Record<CandlePair, string> = {
   // `XAUUSD=X` is delisted on Yahoo (404). `GC=F` is COMEX front-month gold
@@ -24,6 +24,8 @@ const YAHOO_SYMBOL: Record<CandlePair, string> = {
   USDCHF: "USDCHF=X",
   NZDCAD: "NZDCAD=X",
   GBPCHF: "GBPCHF=X",
+  USDJPY: "USDJPY=X",
+  AUDUSD: "AUDUSD=X",
 };
 
 const TD_SYMBOL: Record<CandlePair, string> = {
@@ -40,14 +42,13 @@ const TD_SYMBOL: Record<CandlePair, string> = {
   USDCHF: "USD/CHF",
   NZDCAD: "NZD/CAD",
   GBPCHF: "GBP/CHF",
+  USDJPY: "USD/JPY",
+  AUDUSD: "AUD/USD",
 };
 
-// IBR Live covers these FX pairs (no gold)
+// IBR Live covers these FX pairs for historical aggregate data
 const IBR_SYMBOL: Partial<Record<CandlePair, string>> = {
-  EURUSD: "EURUSD", GBPUSD: "GBPUSD", GBPNZD: "GBPNZD",
-  EURJPY: "EURJPY", CADJPY: "CADJPY", AUDCAD: "AUDCAD",
-  GBPAUD: "GBPAUD", EURAUD: "EURAUD", USDCAD: "USDCAD",
-  USDCHF: "USDCHF", NZDCAD: "NZDCAD", GBPCHF: "GBPCHF",
+  EURUSD: "EURUSD", GBPUSD: "GBPUSD", USDJPY: "USDJPY", AUDUSD: "AUDUSD", USDCAD: "USDCAD"
 };
 
 const IBR_BASE = "https://api.ibrlive.com/api";
@@ -92,12 +93,12 @@ async function ibrAggregate(
   const apiKey = process.env.IBR_LIVE_API_KEY;
   if (!apiKey || apiKey === "your_ibr_live_key_here") return null;
 
-  const url = `${IBR_BASE}/aggregate/data?symbol=${sym}&timeframe=${timeframe}&limit=${limit}`;
+  const url = `${IBR_BASE}/aggregate/data?symbol=${sym}&timeframe=${timeframe}&apiKey=${apiKey}`;
   try {
     const res = await fetchWithTimeout(url, {
       timeoutMs,
       cache: "no-store",
-      headers: { "x-api-key": apiKey, Accept: "application/json" },
+      headers: { Accept: "application/json" },
     });
     if (!res.ok) {
       console.warn(`[candles:ibrlive:${timeframe}] ${pair} HTTP ${res.status}`);
@@ -452,41 +453,83 @@ export async function fetchCandlesWeekly(pair: CandlePair, count = 30): Promise<
 const cache1h = new Map<string, { at: number; candles: Candle[] }>();
 const TTL_1H_MS = 15 * 60_000;
 
+async function ibrLive1h(pair: CandlePair, count: number): Promise<Candle[] | null> {
+  const hourly = await ibrAggregate(pair, "hour", count, 5000);
+  if (!hourly || hourly.length < 5) return null;
+  return hourly;
+}
+
 export async function fetchCandles1h(pair: CandlePair, count = 20): Promise<Candle[] | null> {
   const key = `1h:${pair}:${count}`;
   const hit = cache1h.get(key);
   if (hit && Date.now() - hit.at < TTL_1H_MS) return hit.candles;
 
-  const sym = encodeURIComponent(YAHOO_SYMBOL[pair]);
-  for (const host of YAHOO_HOSTS) {
-    const url = `https://${host}/v8/finance/chart/${sym}?interval=1h&range=5d`;
-    try {
-      const res = await fetchWithTimeout(url, {
-        timeoutMs: 5000,
-        cache: "no-store",
-        headers: YAHOO_HEADERS,
-      });
-      if (res.status === 429) { continue; }
-      if (!res.ok) break;
-      const data = await res.json();
-      const r = data?.chart?.result?.[0];
-      const ts: number[] | undefined = r?.timestamp;
-      const q = r?.indicators?.quote?.[0];
-      if (!ts || !q?.open) break;
-      const candles: Candle[] = [];
-      for (let i = 0; i < ts.length; i++) {
-        const o = q.open[i], h = q.high[i], l = q.low[i], c = q.close[i];
-        if (typeof o === "number" && typeof h === "number" && typeof l === "number" && typeof c === "number") {
-          candles.push({ t: ts[i], o, h, l, c });
+  let candles = await ibrLive1h(pair, count);
+
+  if (!candles) {
+    const sym = encodeURIComponent(YAHOO_SYMBOL[pair]);
+    for (const host of YAHOO_HOSTS) {
+      const url = `https://${host}/v8/finance/chart/${sym}?interval=1h&range=5d`;
+      try {
+        const res = await fetchWithTimeout(url, {
+          timeoutMs: 5000,
+          cache: "no-store",
+          headers: YAHOO_HEADERS,
+        });
+        if (res.status === 429) { continue; }
+        if (!res.ok) break;
+        const data = await res.json();
+        const r = data?.chart?.result?.[0];
+        const ts: number[] | undefined = r?.timestamp;
+        const q = r?.indicators?.quote?.[0];
+        if (!ts || !q?.open) break;
+        const hourly: Candle[] = [];
+        for (let i = 0; i < ts.length; i++) {
+          const o = q.open[i], h = q.high[i], l = q.low[i], c = q.close[i];
+          if (typeof o === "number" && typeof h === "number" && typeof l === "number" && typeof c === "number") {
+            hourly.push({ t: ts[i], o, h, l, c });
+          }
         }
-      }
-      const out = candles.slice(-count);
-      if (out.length >= 5) {
-        cache1h.set(key, { at: Date.now(), candles: out });
-        return out;
-      }
-      break;
-    } catch { /* try next host */ }
+        const out = hourly.slice(-count);
+        if (out.length >= 5) {
+          candles = out;
+          break;
+        }
+        break;
+      } catch { /* try next host */ }
+    }
   }
+
+  if (!candles) {
+    // Fallback to Twelve Data
+    const apiKey = process.env.TWELVEDATA_API_KEY;
+    if (apiKey && apiKey !== "your_twelvedata_key_here") {
+      const url = `https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(
+        TD_SYMBOL[pair]
+      )}&interval=1h&outputsize=${count}&apikey=${apiKey}`;
+      try {
+        const res = await fetchWithTimeout(url, { timeoutMs: 5000, cache: "no-store" });
+        if (res.ok) {
+          const data = await res.json();
+          const values: Array<{ datetime: string; open: string; high: string; low: string; close: string }> = data?.values ?? [];
+          if (values.length >= 5) {
+            candles = values.map((v) => ({
+              t: Math.floor(new Date(v.datetime).getTime() / 1000),
+              o: parseFloat(v.open),
+              h: parseFloat(v.high),
+              l: parseFloat(v.low),
+              c: parseFloat(v.close),
+            })).filter((c) => Number.isFinite(c.o) && Number.isFinite(c.c)).reverse();
+          }
+        }
+      } catch { /* fall through */ }
+    }
+  }
+
+  if (candles) {
+    cache1h.set(key, { at: Date.now(), candles });
+    return candles;
+  }
+
   return hit?.candles ?? null;
 }

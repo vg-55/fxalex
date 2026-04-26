@@ -122,6 +122,7 @@ function Shell({ children }: { children: ReactNode }) {
         <nav className="flex-1 p-3 space-y-0.5">
           <NavLink href="/" icon={<LayoutDashboard size={15} />} label="Live Signals" active={pathname === "/"} />
           <NavLink href="/performance" icon={<LineChart size={15} />} label="Performance" active={pathname === "/performance"} />
+          <NavLink href="/fabio" icon={<Activity size={15} />} label="Fabio 40-Range" active={pathname === "/fabio"} />
         </nav>
 
         {/* Bottom */}
@@ -181,6 +182,7 @@ function Shell({ children }: { children: ReactNode }) {
       {/* Mobile bottom nav */}
       <nav className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-[#0a1120]/95 backdrop-blur-md border-t border-white/[0.06] flex">
         <MobileNavLink href="/" icon={<LayoutDashboard size={17} />} label="Signals" active={pathname === "/"} />
+        <MobileNavLink href="/fabio" icon={<Activity size={17} />} label="Fabio" active={pathname === "/fabio"} />
         <MobileNavLink href="/performance" icon={<LineChart size={17} />} label="Perf" active={pathname === "/performance"} />
       </nav>
 

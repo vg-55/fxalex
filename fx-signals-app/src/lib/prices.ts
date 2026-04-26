@@ -35,8 +35,11 @@ function pairToYahooSymbol(pair: string): string {
 // IBR Live snapshot covers these FX pairs only (no gold)
 const IBR_LIVE_PAIRS = new Set([
   "EURUSD", "GBPUSD", "GBPNZD", "EURJPY", "CADJPY",
-  "AUDCAD", "GBPAUD", "EURAUD", "USDCAD", "USDCHF", "NZDCAD", "GBPCHF",
+  "AUDCAD", "GBPAUD", "EURAUD", "USDCAD", "USDCHF", "NZDCAD", "GBPCHF", "USDJPY", "AUDUSD"
 ]);
+
+// IBR Live only has previous close / historical data for a limited subset
+const IBR_HISTORICAL_PAIRS = new Set(["EURUSD", "GBPUSD", "USDJPY", "AUDUSD"]);
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -117,9 +120,11 @@ type IbrPrevClose = { open: number; high: number; low: number; close: number };
 type IbrPrevCloseResponse = { success: boolean; data?: IbrPrevClose };
 
 async function ibrGet<T>(path: string, apiKey: string, timeoutMs = 6000): Promise<T> {
-  const res = await fetchWithTimeout(`${IBR_BASE}${path}`, {
+  const separator = path.includes('?') ? '&' : '?';
+  const url = `${IBR_BASE}${path}${separator}apiKey=${apiKey}`;
+  const res = await fetchWithTimeout(url, {
     timeoutMs, cache: "no-store",
-    headers: { "x-api-key": apiKey, Accept: "application/json" },
+    headers: { Accept: "application/json" },
   });
   if (!res.ok) throw new Error(`IBR Live HTTP ${res.status} for ${path}`);
   const data = (await res.json()) as T & { success?: boolean };
@@ -189,9 +194,11 @@ async function fromIbrLive(apiKey: string, pairs: string[]): Promise<PriceBundle
   const [snapshot, ...rest] = await Promise.all([
     ibrGet<IbrSnapshotResponse>("/forex/snapshot", apiKey),
     ...ibrPairs.map((p) =>
-      ibrGet<IbrPrevCloseResponse>(`/forex/previous-close?symbol=${p}`, apiKey).catch(
-        () => null as IbrPrevCloseResponse | null
-      )
+      IBR_HISTORICAL_PAIRS.has(p)
+        ? ibrGet<IbrPrevCloseResponse>(`/forex/previous-close?symbol=${p}`, apiKey).catch(
+            () => null as IbrPrevCloseResponse | null
+          )
+        : Promise.resolve(null)
     ),
     needsGold
       ? fetchXauusdViaCascade().catch((e: unknown) => {
@@ -231,12 +238,13 @@ const FINNHUB_SYMBOL: Record<string, string> = {
   GBPNZD: "OANDA:GBP_NZD", EURJPY: "OANDA:EUR_JPY", CADJPY: "OANDA:CAD_JPY",
   AUDCAD: "OANDA:AUD_CAD", GBPAUD: "OANDA:GBP_AUD", EURAUD: "OANDA:EUR_AUD",
   USDCAD: "OANDA:USD_CAD", USDCHF: "OANDA:USD_CHF", NZDCAD: "OANDA:NZD_CAD",
-  GBPCHF: "OANDA:GBP_CHF",
+  GBPCHF: "OANDA:GBP_CHF", USDJPY: "OANDA:USD_JPY", AUDUSD: "OANDA:AUD_USD",
 };
 
 async function finnhubQuote(symbol: string, apiKey: string): Promise<Quote> {
   const url = `https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(symbol)}&token=${apiKey}`;
   const res = await fetchWithTimeout(url, { timeoutMs: 6000, cache: "no-store" });
+  if (res.status === 403 || res.status === 429) throw new Error(`Finnhub Rate Limit/Auth for ${symbol}`);
   if (!res.ok) throw new Error(`Finnhub HTTP ${res.status} for ${symbol}`);
   const d = await res.json();
   const price = Number(d?.c);
@@ -373,14 +381,18 @@ function computeDeviation(a: number, b: number): number {
   return (Math.abs(a - b) / mid) * 100;
 }
 
-async function fetchSecondary(pairs: string[]): Promise<PriceBundle | null> {
-  try { return await fromYahoo(pairs); } catch { /* fall through */ }
+async function fetchSecondary(pairs: string[], skipSource?: ProviderSource): Promise<PriceBundle | null> {
+  if (skipSource !== "yahoo") {
+    try { return await fromYahoo(pairs); } catch { /* fall through */ }
+  }
+  
   const fhKey = process.env.FINNHUB_API_KEY;
-  if (fhKey && fhKey !== "your_finnhub_key_here") {
+  if (fhKey && fhKey !== "your_finnhub_key_here" && skipSource !== "finnhub") {
     try { return await fromFinnhub(fhKey, pairs); } catch { /* fall through */ }
   }
+  
   const tdKey = process.env.TWELVEDATA_API_KEY;
-  if (tdKey && tdKey !== "your_twelvedata_key_here") {
+  if (tdKey && tdKey !== "your_twelvedata_key_here" && skipSource !== "twelvedata") {
     try { return await fromTwelveData(tdKey, pairs); } catch { /* fall through */ }
   }
   return null;
@@ -390,23 +402,19 @@ export async function fetchLivePricesValidated(pairs?: string[]): Promise<Valida
   const requestedPairs = pairs ?? ["EURUSD", "GBPUSD", "XAUUSD"];
   const threshold = Number(process.env.PRICE_DEVIATION_MAX_PCT ?? 0.15);
 
-  const [primaryResult, secondaryResult] = await Promise.allSettled([
-    fetchLivePrices(requestedPairs),
-    fetchSecondary(requestedPairs),
-  ]);
-
-  if (primaryResult.status !== "fulfilled") {
-    throw primaryResult.reason instanceof Error
-      ? primaryResult.reason
-      : new Error("primary price feed failed");
+  let primary: PriceBundle;
+  try {
+    primary = await fetchLivePrices(requestedPairs);
+  } catch (err) {
+    throw err instanceof Error ? err : new Error("primary price feed failed");
   }
-  const primary = primaryResult.value;
-  const secondary =
-    secondaryResult.status === "fulfilled" &&
-    secondaryResult.value &&
-    secondaryResult.value.source !== primary.source
-      ? secondaryResult.value
-      : null;
+
+  const secondaryResult = await fetchSecondary(
+    requestedPairs, 
+    primary.source === "ibrlive+yahoo" ? "yahoo" : primary.source
+  ).catch(() => null);
+
+  const secondary = secondaryResult && secondaryResult.source !== primary.source ? secondaryResult : null;
 
   const validatedQuotes: Record<string, ValidatedQuote> = {};
   let anyStale = false;

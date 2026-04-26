@@ -149,6 +149,28 @@ const SEED: Seed[] = [
     slBufferPct: 0.1,
     enabled: true,
   },
+  {
+    pair: "USDJPY",
+    tvSymbol: "OANDA:USDJPY",
+    timeframe: "1H",
+    aoiLow: 150.0,
+    aoiHigh: 151.0,
+    ma50: 150.5,
+    decimals: 3,
+    slBufferPct: 0.25,
+    enabled: true,
+  },
+  {
+    pair: "AUDUSD",
+    tvSymbol: "OANDA:AUDUSD",
+    timeframe: "1H",
+    aoiLow: 0.6500,
+    aoiHigh: 0.6600,
+    ma50: 0.6550,
+    decimals: 5,
+    slBufferPct: 0.25,
+    enabled: true,
+  },
 ];
 
 export async function seedInstruments() {
