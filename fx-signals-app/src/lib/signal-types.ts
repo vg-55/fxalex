@@ -74,6 +74,10 @@ export type Signal = {
   newsBlocked: boolean;
   nextEvent?: NewsEvent | null;
   isStale: boolean;
+  /** ISO time when status first became ACTIVE (frozen on the row) */
+  enteredAt?: string;
+  /** True when the row carries a frozen entry/SL/TP snapshot. */
+  locked: boolean;
 };
 
 // DB row shape used by the SSE stream (price/sl/tp are numbers here)
@@ -112,8 +116,10 @@ export function rowToSignal(row: StreamSignalRow): Signal {
   const factors = row.factors;
   // weeklyBias is stored inside factors.weeklyBias (no DB migration needed)
   const weeklyBias: "Bullish" | "Bearish" | "Ranging" = factors?.weeklyBias ?? "Ranging";
+  // _locked snapshot is stamped on first ACTIVE and preserved across scans.
+  const lock = (factors as { _locked?: { at: string; entry: number; sl: number; tp: number; type: "BUY" | "SELL" } } | null)?._locked;
   return {
-    id: row.pair,
+    id: `${row.pair}:${row.type}`,
     pair: row.pair,
     type: row.type,
     status: row.status,
@@ -142,5 +148,7 @@ export function rowToSignal(row: StreamSignalRow): Signal {
     newsBlocked: row.newsBlocked,
     nextEvent: row.nextEvent ?? null,
     isStale: row.isStale,
+    enteredAt: lock?.at,
+    locked: !!lock,
   };
 }

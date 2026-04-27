@@ -6,6 +6,7 @@ import { fetchCandles4h, fetchClosesDaily, fetchCandles1h, fetchCandlesWeekly, t
 import { ema } from "./ema";
 import { atr } from "./atr";
 import { hasRejection, emaAoiConfluence, isImpulsiveMove, isPinBar, getWickLevel, weeklyBiasScore } from "./patterns";
+import { computeAoi, pickAoiForBias, shouldReplaceAoi } from "./aoi";
 import { refreshNewsIfStale, nextRelevantEvent } from "./news";
 import { evaluateOutcomes } from "./outcomes";
 import { pushExternal } from "./notifier";
@@ -234,7 +235,29 @@ export async function runScanOnce(): Promise<ScanSummary> {
       if (!quote) continue;
 
       const pe = enrich[pair] ?? {};
-      const cfg = pe.ema4h != null ? { ...inst, ma50: pe.ema4h } : inst;
+
+      // ── Auto-AOI: replace stale static zones with the nearest pivot cluster ─────
+      // Picks support below price for BUY bias, resistance above for SELL.
+      // Persists back to `instruments` if the band materially shifted.
+      let aoiLow = inst.aoiLow;
+      let aoiHigh = inst.aoiHigh;
+      if (pe.candles && pe.candles.length >= 20) {
+        const trendBias: "BUY" | "SELL" =
+          quote.price > (pe.ema4h ?? inst.ma50) ? "BUY" : "SELL";
+        const aoi = computeAoi(pe.candles, quote.price, 0.25);
+        const next = pickAoiForBias(aoi, trendBias);
+        if (next && shouldReplaceAoi(inst.aoiLow, inst.aoiHigh, next, quote.price)) {
+          aoiLow = next.low;
+          aoiHigh = next.high;
+          await db
+            .update(schema.instruments)
+            .set({ aoiLow, aoiHigh, updatedAt: new Date() })
+            .where(eq(schema.instruments.pair, inst.pair));
+        }
+      }
+      const cfg = pe.ema4h != null
+        ? { ...inst, aoiLow, aoiHigh, ma50: pe.ema4h }
+        : { ...inst, aoiLow, aoiHigh };
 
       const fourHBias = quote.price > (pe.ema4h ?? inst.ma50) ? "BUY" : "SELL";
       const dailyBias = pe.emaDaily != null ? (quote.price > pe.emaDaily ? "BUY" : "SELL") : fourHBias;
@@ -246,9 +269,9 @@ export async function runScanOnce(): Promise<ScanSummary> {
         ? hasRejection(pe.candles, fourHBias)     // 4H fallback
         : false;
 
-      // EMA-in-AOI confluence grade
+      // EMA-in-AOI confluence grade (uses freshly computed AOI band)
       const emaAoiGrade = (pe.ema4h != null)
-        ? emaAoiConfluence(pe.ema4h, inst.aoiLow, inst.aoiHigh)
+        ? emaAoiConfluence(pe.ema4h, aoiLow, aoiHigh)
         : (0 as const);
 
       // Anti-FOMO: detect large impulsive move
@@ -325,7 +348,64 @@ export async function runScanOnce(): Promise<ScanSummary> {
     const prevMap = new Map(prev.map((s) => [s.pair, s]));
 
     const nowMap = new Map(engineSignals.map((s) => [s.pair, { status: s.status }]));
-    const outcomesCount = await evaluateOutcomes(prev, nowMap);
+    const { written: outcomesCount, closedPairs } = await evaluateOutcomes(prev, nowMap);
+
+    // ── LATCH: keep ACTIVE rows pinned to their original entry/SL/TP across scans ────
+    // Set & Forget: once a trade triggers, it stays open until TP or SL.
+    // Outcome eval already wrote a result for closedPairs, so those drop out of ACTIVE.
+    for (const s of engineSignals) {
+      const before = prevMap.get(s.pair);
+      if (!before || before.status !== "ACTIVE") continue;
+      if (closedPairs.has(s.pair)) continue;
+
+      const beforeFactors = (before.factors ?? {}) as { _locked?: { at: string; entry: number; sl: number; tp: number; type: "BUY" | "SELL" } };
+      const lock = beforeFactors._locked;
+      if (lock) {
+        s.status = "ACTIVE";
+        s.type = lock.type;
+        s.price = lock.entry;
+        s.sl = lock.sl;
+        s.tp = lock.tp;
+        const risk = Math.abs(lock.entry - lock.sl);
+        const reward = Math.abs(lock.tp - lock.entry);
+        s.rr = reward / (risk || 1);
+        s.factors = { ...s.factors, _locked: lock };
+      } else {
+        // Legacy ACTIVE row from before locking landed: backfill the lock from the row.
+        s.status = "ACTIVE";
+        s.type = before.type as "BUY" | "SELL";
+        s.price = before.price;
+        s.sl = before.sl;
+        s.tp = before.tp;
+        s.rr = before.rr;
+        s.factors = {
+          ...s.factors,
+          _locked: {
+            at: before.updatedAt.toISOString(),
+            entry: before.price,
+            sl: before.sl,
+            tp: before.tp,
+            type: before.type as "BUY" | "SELL",
+          },
+        };
+      }
+    }
+
+    // Stamp lock on first transition into ACTIVE.
+    for (const s of engineSignals) {
+      if (s.status !== "ACTIVE") continue;
+      if (s.factors._locked) continue;
+      s.factors = {
+        ...s.factors,
+        _locked: {
+          at: now.toISOString(),
+          entry: s.price,
+          sl: s.sl,
+          tp: s.tp,
+          type: s.type,
+        },
+      };
+    }
 
     // Run AI boost + interpretation in parallel for all pairs
     const [aiBoosts, aiTexts] = await Promise.all([

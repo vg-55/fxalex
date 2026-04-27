@@ -229,9 +229,104 @@ export const signalOutcomes = pgTable(
   })
 );
 
+// ---------------------------------------------------------------------------
+// mt5_accounts — broker accounts the trader has connected for live execution
+// (credentials are AES-GCM encrypted at rest; provisioned via MetaApi.cloud)
+// ---------------------------------------------------------------------------
+export const mt5Accounts = pgTable("mt5_accounts", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  label: text("label").notNull(),
+  broker: text("broker"),
+  server: text("server").notNull(),
+  login: text("login").notNull(),
+  passwordEnc: text("password_enc").notNull(),
+  // MetaApi provisioning
+  metaapiAccountId: text("metaapi_account_id"),
+  metaapiRegion: text("metaapi_region").notNull().default("new-york"),
+  metaapiState: text("metaapi_state"), // UNDEPLOYED | DEPLOYING | DEPLOYED | UNDEPLOYING | …
+  // mode + filters
+  mode: text("mode").notNull().default("OFF"), // OFF | SHADOW | LIVE
+  strategies: jsonb("strategies").notNull().default(sql`'["COMBINED"]'::jsonb`), // string[]
+  symbols: jsonb("symbols"), // null = all, else string[]
+  // risk config
+  riskPctPerTrade: doublePrecision("risk_pct_per_trade").notNull().default(0.5),
+  maxConcurrent: integer("max_concurrent").notNull().default(3),
+  maxDailyLossPct: doublePrecision("max_daily_loss_pct").notNull().default(3),
+  maxLot: doublePrecision("max_lot").notNull().default(1),
+  minRR: doublePrecision("min_rr").notNull().default(1.5),
+  // live snapshot (refreshed by poller)
+  balance: doublePrecision("balance"),
+  equity: doublePrecision("equity"),
+  margin: doublePrecision("margin"),
+  marginLevel: doublePrecision("margin_level"),
+  currency: text("currency"),
+  lastSyncedAt: timestamp("last_synced_at", { withTimezone: true }),
+  lastError: text("last_error"),
+  enabled: boolean("enabled").notNull().default(true),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+// ---------------------------------------------------------------------------
+// mt5_orders — every order request the router emits (audit + reconciliation)
+// ---------------------------------------------------------------------------
+export const mt5Orders = pgTable(
+  "mt5_orders",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    accountId: uuid("account_id").notNull(),
+    idempotencyKey: text("idempotency_key").notNull(),
+    signalPair: text("signal_pair").notNull(),
+    signalSource: text("signal_source").notNull(), // ALEX | FABIO | COMBINED
+    signalType: text("signal_type").notNull(),     // BUY | SELL
+    status: text("status").notNull(),              // PENDING | OPEN | CLOSED | REJECTED | ERRORED | SHADOW
+    ticket: text("ticket"),
+    symbol: text("symbol").notNull(),
+    side: text("side").notNull(),
+    requestedLot: doublePrecision("requested_lot").notNull(),
+    filledLot: doublePrecision("filled_lot"),
+    entry: doublePrecision("entry").notNull(),
+    sl: doublePrecision("sl").notNull(),
+    tp: doublePrecision("tp").notNull(),
+    closePrice: doublePrecision("close_price"),
+    pnl: doublePrecision("pnl"),
+    commission: doublePrecision("commission"),
+    swap: doublePrecision("swap"),
+    rejectionReason: text("rejection_reason"),
+    openedAt: timestamp("opened_at", { withTimezone: true }),
+    closedAt: timestamp("closed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    byAccount: index("mt5_orders_account_idx").on(t.accountId, t.createdAt.desc()),
+    byIdempotency: index("mt5_orders_idempotency_idx").on(t.idempotencyKey),
+  })
+);
+
+// ---------------------------------------------------------------------------
+// mt5_audit — append-only operational log for the live-trading pipeline
+// ---------------------------------------------------------------------------
+export const mt5Audit = pgTable(
+  "mt5_audit",
+  {
+    id: serial("id").primaryKey(),
+    accountId: uuid("account_id"),
+    level: text("level").notNull(), // info | warn | error
+    event: text("event").notNull(),
+    detail: jsonb("detail"),
+    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    byAccount: index("mt5_audit_account_idx").on(t.accountId, t.at.desc()),
+  })
+);
+
 export type Instrument = typeof instruments.$inferSelect;
 export type SignalRow = typeof signals.$inferSelect;
 export type NotificationRow = typeof notifications.$inferSelect;
 export type AccountSettingsRow = typeof accountSettings.$inferSelect;
 export type NewsEventRow = typeof newsEvents.$inferSelect;
 export type SignalOutcomeRow = typeof signalOutcomes.$inferSelect;
+export type Mt5AccountRow = typeof mt5Accounts.$inferSelect;
+export type Mt5OrderRow = typeof mt5Orders.$inferSelect;
+export type Mt5AuditRow = typeof mt5Audit.$inferSelect;

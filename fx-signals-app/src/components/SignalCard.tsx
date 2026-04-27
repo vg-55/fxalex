@@ -13,6 +13,7 @@ import {
   BarChart2,
   Zap,
   Sparkles,
+  Lock,
 } from "lucide-react";
 import { format } from "date-fns";
 import ConfidenceRing from "./ConfidenceRing";
@@ -27,6 +28,8 @@ type Props = {
   isRefreshing: boolean;
   now: Date;
   sparklineData?: number[];
+  /** Latest tick price for this pair (last entry of sparkline series). */
+  currentPrice?: number;
   positionSize?: { lots: string; pips: number; risk: number };
   onSelect: () => void;
 };
@@ -38,6 +41,10 @@ function relativeTime(from: Date, now: Date): string {
   const m = Math.floor(s / 60);
   if (m < 60) return `${m}m ago`;
   return `${Math.floor(m / 60)}h ago`;
+}
+
+function clamp01(n: number): number {
+  return Math.max(0, Math.min(1, n));
 }
 
 function StatusBadge({ status }: { status: Signal["status"] }) {
@@ -100,6 +107,7 @@ export default function SignalCard({
   isRefreshing,
   now,
   sparklineData,
+  currentPrice,
   positionSize,
   onSelect,
 }: Props) {
@@ -107,6 +115,27 @@ export default function SignalCard({
   const decimals = pairDecimals(signal.pair);
   const isBuy = signal.type === "BUY";
   const f = signal.factors;
+
+  // Live trade math (only meaningful when ACTIVE and we have a live tick).
+  const entryPx = parseFloat(signal.price);
+  const slPx = parseFloat(signal.sl);
+  const tpPx = parseFloat(signal.tp);
+  const liveActive = signal.status === "ACTIVE" && typeof currentPrice === "number";
+  const risk = Math.abs(entryPx - slPx) || 1;
+  const floatingR = liveActive
+    ? ((isBuy ? currentPrice! - entryPx : entryPx - currentPrice!) / risk)
+    : 0;
+  // SL ←— entry —→ TP positions for the progress bar
+  const lo = isBuy ? slPx : tpPx;
+  const hi = isBuy ? tpPx : slPx;
+  const span = hi - lo || 1;
+  const entryPct = clamp01((entryPx - lo) / span);
+  const livePct = liveActive ? clamp01((currentPrice! - lo) / span) : entryPct;
+
+  // Live news countdown (ignore stale minutesUntil from scan time).
+  const newsMinutesLeft = signal.nextEvent?.scheduledAt
+    ? Math.max(0, Math.round((new Date(signal.nextEvent.scheduledAt).getTime() - now.getTime()) / 60_000))
+    : null;
 
   const cardBorder = isCharted
     ? "border-blue-500/40 shadow-[0_0_0_1px_rgba(59,130,246,0.15),0_4px_24px_rgba(59,130,246,0.08)]"
@@ -178,20 +207,32 @@ export default function SignalCard({
         {/* News warning */}
         {signal.newsBlocked && signal.nextEvent && (
           <div className="mb-3">
-            <NewsWarning event={signal.nextEvent} />
+            <NewsWarning event={{ ...signal.nextEvent, minutesUntil: newsMinutesLeft ?? signal.nextEvent.minutesUntil }} />
           </div>
         )}
 
         {/* ── Price levels ─────────────────────────────────────────────────── */}
         <div className="grid grid-cols-3 gap-2 mb-3">
-          <div className="bg-white/[0.03] rounded-lg p-2.5 border border-white/[0.04]">
-            <div className="text-[9px] uppercase tracking-wider text-slate-600 mb-1">Entry</div>
+          <div className="bg-white/[0.03] rounded-lg p-2.5 border border-white/[0.04] relative">
+            <div className="text-[9px] uppercase tracking-wider text-slate-600 mb-1 flex items-center gap-1">
+              Entry
+              {signal.locked && (
+                <Lock size={8} className="text-blue-400/80" aria-label="Levels frozen at trigger" />
+              )}
+            </div>
             <div className="text-sm font-mono font-bold text-white">{signal.price}</div>
-            {typeof signal.dayHigh === "number" && typeof signal.dayLow === "number" && (
+            {liveActive ? (
+              <div className="text-[9px] mt-0.5 font-mono leading-tight">
+                <span className="text-slate-500">Now </span>
+                <span className={floatingR >= 0 ? "text-emerald-400" : "text-rose-400"}>
+                  {currentPrice!.toFixed(decimals)}
+                </span>
+              </div>
+            ) : typeof signal.dayHigh === "number" && typeof signal.dayLow === "number" ? (
               <div className="text-[9px] text-slate-600 mt-0.5 font-mono leading-tight">
                 {signal.dayLow.toFixed(decimals)}–{signal.dayHigh.toFixed(decimals)}
               </div>
-            )}
+            ) : null}
           </div>
           <div className="bg-rose-500/[0.04] rounded-lg p-2.5 border border-rose-500/15">
             <div className="text-[9px] uppercase tracking-wider text-slate-600 mb-1">Stop</div>
@@ -209,12 +250,45 @@ export default function SignalCard({
           </div>
         </div>
 
-        {/* ── Sparkline + sizing ───────────────────────────────────────────── */}
+        {/* ── Live trade strip (ACTIVE + live tick) ─────────────────────────── */}
+        {liveActive && (
+          <div className="mb-3 bg-white/[0.02] border border-white/[0.05] rounded-lg p-2.5">
+            <div className="flex items-center justify-between mb-1.5 text-[10px]">
+              <span className="text-slate-500 uppercase tracking-wider">Floating</span>
+              <span
+                className={`font-mono font-bold ${
+                  floatingR >= 0 ? "text-emerald-400" : "text-rose-400"
+                }`}
+              >
+                {floatingR >= 0 ? "+" : ""}
+                {floatingR.toFixed(2)}R
+              </span>
+            </div>
+            <div className="relative h-1.5 bg-[#1a2540] rounded overflow-hidden">
+              <div className="absolute top-0 bottom-0 left-0 bg-rose-500/15" style={{ width: `${entryPct * 100}%` }} />
+              <div className="absolute top-0 bottom-0 bg-emerald-500/15" style={{ left: `${entryPct * 100}%`, width: `${(1 - entryPct) * 100}%` }} />
+              <div className="absolute top-0 bottom-0 w-px bg-slate-400/60" style={{ left: `${entryPct * 100}%` }} />
+              <div
+                className={`absolute top-0 bottom-0 w-1 rounded-sm ${floatingR >= 0 ? "bg-emerald-400" : "bg-rose-400"}`}
+                style={{ left: `calc(${livePct * 100}% - 2px)` }}
+              />
+            </div>
+            <div className="flex items-center justify-between mt-1 text-[9px] text-slate-600 font-mono">
+              <span>SL</span>
+              {signal.enteredAt && <span>since {relativeTime(new Date(signal.enteredAt), now)}</span>}
+              <span>TP</span>
+            </div>
+          </div>
+        )}
+
+        {/* ── Sparkline + sizing ───────────────────────────────────── */}
         <div className="flex items-center gap-3 mb-3 bg-white/[0.02] rounded-lg px-3 py-2 border border-white/[0.04]">
           <div className="flex items-center gap-2 flex-1 min-w-0">
             <BarChart2 size={12} className="text-slate-600 shrink-0" />
             <Sparkline data={sparklineData ?? []} width={80} height={24} />
-            <span className="text-[9px] text-slate-600 uppercase tracking-wider shrink-0">1h</span>
+            <span className="text-[9px] text-slate-600 uppercase tracking-wider shrink-0">
+              {sparklineData?.length ? `${sparklineData.length} ticks` : "no ticks"}
+            </span>
           </div>
           {positionSize ? (
             <div className="text-right shrink-0">
@@ -253,7 +327,6 @@ export default function SignalCard({
             <FactorBar label="Rejection"  value={f.rejection}      max={15} color={f.rejection >= 12 ? "bg-emerald-500" : f.rejection > 0 ? "bg-amber-500" : "bg-slate-700"} />
             <FactorBar label="Momentum"   value={f.momentum}       max={10} color={f.momentum >= 7 ? "bg-emerald-500" : f.momentum >= 4 ? "bg-amber-500" : "bg-slate-600"} />
             <FactorBar label="Session"    value={f.sessionQuality} max={10} color={f.sessionQuality >= 8 ? "bg-emerald-500" : f.sessionQuality >= 5 ? "bg-amber-500" : "bg-slate-600"} />
-            <FactorBar label="R:R"        value={f.rrQuality}      max={10} color={f.rrQuality >= 8 ? "bg-emerald-500" : f.rrQuality >= 4 ? "bg-amber-500" : "bg-rose-500"} />
           </div>
         </div>
 

@@ -1,8 +1,11 @@
 import { db, schema, assertDb } from "@/db/client";
-import { eq, desc, gte } from "drizzle-orm";
+import { eq, desc } from "drizzle-orm";
 import { type CandlePair } from "./candles";
 import { callGLM } from "./engine";
 
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
 export type Tick = {
   price: number;
   time: number;
@@ -14,53 +17,215 @@ export type RangeCandle = {
   low: number;
   close: number;
   timestamp: number;
-  volume: number;
+  volume: number; // tick-count (no real volume in spot FX)
   isUp: boolean;
 };
 
-export type VolumeProfile = {
+export type VolumeProfileBin = {
   priceLevel: number;
   volume: number;
 };
 
+export type MarketState = "BALANCE" | "EXPANSION";
+
+export type FabioSignalModel =
+  | "TRIPLE_A_LONG"
+  | "TRIPLE_A_SHORT"
+  | "ABSORPTION_LONG"
+  | "ABSORPTION_SHORT"
+  | "IB_BREAKOUT_LONG"
+  | "IB_BREAKOUT_SHORT"
+  | "NONE";
+
 export type FabioAnalysis = {
   pair: string;
   candles: RangeCandle[];
-  vah: number; // Value Area High
-  val: number; // Value Area Low
-  poc: number; // Point of Control
+  vah: number;
+  val: number;
+  poc: number;
   currentPrice: number;
   isInsideValueArea: boolean;
+  marketState: MarketState;
   signal: "BUY" | "SELL" | "NEUTRAL";
+  signalModel: FabioSignalModel;
   reasoning: string;
   aiInterpretation?: string;
   aiConfidenceScore?: number;
   entryPrice?: number;
   targetPrice?: number;
   stopLoss?: number;
-  cvd: number; // Cumulative Volume Delta
+  /**
+   * Tick-delta proxy. Spot FX has no centralised tape, so this is NOT a real
+   * Cumulative Volume Delta (no aggressive-buy vs aggressive-sell separation
+   * is possible). It is a magnitude-weighted up-tick − down-tick count, in
+   * units of tickSize. Treat as a coarse pressure indicator only.
+   */
+  tickDelta: number;
+  lvns: VolumeProfileBin[];
+  ibHigh: number | null;
+  ibLow: number | null;
+  appliedRangeTicks: number;
+  binSize: number;
+  degraded: boolean;
 };
 
-// Fabio specifically uses 40 ticks range charts. We will define 1 tick as a pip/point depending on the pair.
-// However, since we might have sparse data from price_ticks (fetched every 1-2 mins),
-// we need to simulate the range candle generation based on the data we have.
-// In reality, a "tick" in his methodology is a fixed price movement.
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
 const TICKS_PER_CANDLE = 40;
+const PROFILE_BINS_PER_TICK = 5; // bin = 5 × tickSize → stable POC/VA
+const VALUE_AREA_PCT = 0.7;
+const NY_OPEN_UTC_HOUR = 13; // 09:30 NY ≈ 13:30 UTC during DST (approximate)
+const NY_OPEN_UTC_MIN = 30;
+const IB_MINUTES = 30;
 
 function getTickSize(pair: string) {
   if (pair.includes("JPY")) return 0.01;
-  if (pair === "XAUUSD") return 0.1; // Gold points
-  return 0.0001; // Standard forex pip
+  if (pair === "XAUUSD") return 0.1;
+  return 0.0001;
 }
 
-// In-memory cache for AI interpretations so it doesn't randomly change on every refresh
-// when the market state hasn't meaningfully changed.
 const aiCache = new Map<string, { interpretation: string; score: number }>();
 
+// ---------------------------------------------------------------------------
+// Range candle construction
+// ---------------------------------------------------------------------------
+function buildRangeCandles(ticks: Tick[], rangeTarget: number): RangeCandle[] {
+  const candles: RangeCandle[] = [];
+  let cur: Partial<RangeCandle> | null = null;
+  let vol = 0;
+  for (const tick of ticks) {
+    if (!cur) {
+      cur = { open: tick.price, high: tick.price, low: tick.price, timestamp: tick.time };
+      vol = 1;
+      continue;
+    }
+    cur.high = Math.max(cur.high!, tick.price);
+    cur.low = Math.min(cur.low!, tick.price);
+    vol++;
+    if ((cur.high! - cur.low!) >= rangeTarget) {
+      candles.push({
+        open: cur.open!,
+        high: cur.high!,
+        low: cur.low!,
+        close: tick.price,
+        timestamp: cur.timestamp!,
+        volume: vol,
+        isUp: tick.price >= cur.open!,
+      });
+      cur = null;
+      vol = 0;
+    }
+  }
+  if (cur && vol > 0) {
+    const last = ticks[ticks.length - 1].price;
+    candles.push({
+      open: cur.open!,
+      high: cur.high!,
+      low: cur.low!,
+      close: last,
+      timestamp: cur.timestamp!,
+      volume: vol,
+      isUp: last >= cur.open!,
+    });
+  }
+  return candles;
+}
+
+// ---------------------------------------------------------------------------
+// Volume profile (binned)
+// ---------------------------------------------------------------------------
+function computeProfile(ticks: Tick[], binSize: number) {
+  const map = new Map<number, number>();
+  for (const t of ticks) {
+    const bin = Math.round(t.price / binSize) * binSize;
+    const key = Number(bin.toFixed(8));
+    map.set(key, (map.get(key) || 0) + 1);
+  }
+  let totalVolume = 0;
+  let maxVolume = 0;
+  let poc = ticks[0].price;
+  for (const [price, v] of map.entries()) {
+    totalVolume += v;
+    if (v > maxVolume) {
+      maxVolume = v;
+      poc = price;
+    }
+  }
+  const target = totalVolume * VALUE_AREA_PCT;
+  let cum = maxVolume;
+  const sortedLevels = Array.from(map.keys()).sort((a, b) => a - b);
+  const pocIdx = sortedLevels.indexOf(poc);
+  let up = pocIdx + 1;
+  let down = pocIdx - 1;
+  let vah = poc;
+  let val = poc;
+  while (cum < target && (up < sortedLevels.length || down >= 0)) {
+    const upPrice = up < sortedLevels.length ? sortedLevels[up] : null;
+    const downPrice = down >= 0 ? sortedLevels[down] : null;
+    const upVol = upPrice !== null ? map.get(upPrice) || 0 : -1;
+    const downVol = downPrice !== null ? map.get(downPrice) || 0 : -1;
+    if (upVol >= downVol && upPrice !== null) {
+      cum += upVol;
+      vah = upPrice;
+      up++;
+    } else if (downPrice !== null) {
+      cum += downVol;
+      val = downPrice;
+      down--;
+    } else break;
+  }
+
+  // LVNs: bins inside value area whose volume is in the bottom decile.
+  const vaBins: VolumeProfileBin[] = sortedLevels
+    .filter((p) => p >= val && p <= vah)
+    .map((p) => ({ priceLevel: p, volume: map.get(p) || 0 }));
+  const sortedByVol = [...vaBins].sort((a, b) => a.volume - b.volume);
+  const lvnCount = Math.max(1, Math.floor(vaBins.length * 0.1));
+  const lvns = sortedByVol.slice(0, lvnCount);
+
+  return { poc, vah, val, totalVolume, lvns };
+}
+
+// ---------------------------------------------------------------------------
+// Tick-delta proxy (NOT real CVD)
+// ---------------------------------------------------------------------------
+function computeTickDelta(ticks: Tick[], tickSize: number): number {
+  let delta = 0;
+  for (let i = 1; i < ticks.length; i++) {
+    const d = ticks[i].price - ticks[i - 1].price;
+    if (d === 0) continue;
+    delta += d / tickSize;
+  }
+  return Math.round(delta);
+}
+
+// ---------------------------------------------------------------------------
+// Initial Balance (first 30 min after NY open today, UTC-approximated)
+// ---------------------------------------------------------------------------
+function computeInitialBalance(ticks: Tick[]): { high: number | null; low: number | null } {
+  if (ticks.length === 0) return { high: null, low: null };
+  const last = new Date(ticks[ticks.length - 1].time);
+  const ibStart = new Date(
+    Date.UTC(last.getUTCFullYear(), last.getUTCMonth(), last.getUTCDate(), NY_OPEN_UTC_HOUR, NY_OPEN_UTC_MIN, 0)
+  );
+  const ibEnd = new Date(ibStart.getTime() + IB_MINUTES * 60_000);
+  let high: number | null = null;
+  let low: number | null = null;
+  for (const t of ticks) {
+    if (t.time < ibStart.getTime() || t.time > ibEnd.getTime()) continue;
+    if (high === null || t.price > high) high = t.price;
+    if (low === null || t.price < low) low = t.price;
+  }
+  return { high, low };
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
 export async function getFabioAnalysis(pair: CandlePair): Promise<FabioAnalysis | null> {
   assertDb();
-  
-  // Fetch the last 2000 ticks (price points)
+
   const rows = await db
     .select({
       price: schema.priceTicks.price,
@@ -73,210 +238,161 @@ export async function getFabioAnalysis(pair: CandlePair): Promise<FabioAnalysis 
 
   if (rows.length < 50) return null;
 
-  // Data comes newest first, we need oldest first to build candles forward
-  const ticks: Tick[] = rows.reverse().map(r => ({
-    price: Number(r.price),
-    time: r.fetchedAt.getTime()
-  })).filter(t => t.price > 0);
-
+  const ticks: Tick[] = rows
+    .reverse()
+    .map((r) => ({ price: Number(r.price), time: r.fetchedAt.getTime() }))
+    .filter((t) => t.price > 0);
   if (ticks.length < 50) return null;
 
   const tickSize = getTickSize(pair);
-  
-  let rangeCandles: RangeCandle[] = [];
-  let requiredRange = TICKS_PER_CANDLE * tickSize;
-  let appliedRangeTicks = TICKS_PER_CANDLE;
 
-  // CVD tracker & Profile map
-  let cvd = 0;
-  const volumeProfileMap = new Map<number, number>();
-
-  // Helper to build candles so we can retry with smaller ranges if market is dead (e.g. weekend)
-  const tryBuildCandles = (rangeTarget: number) => {
-    const candles: RangeCandle[] = [];
-    let currentCandle: Partial<RangeCandle> | null = null;
-    let currentVolume = 0;
-    for (const tick of ticks) {
-      if (!currentCandle) {
-        currentCandle = { open: tick.price, high: tick.price, low: tick.price, timestamp: tick.time };
-        currentVolume = 1;
-      } else {
-        currentCandle.high = Math.max(currentCandle.high!, tick.price);
-        currentCandle.low = Math.min(currentCandle.low!, tick.price);
-        currentVolume++;
-        if ((currentCandle.high! - currentCandle.low!) >= rangeTarget) {
-          candles.push({
-            open: currentCandle.open!, high: currentCandle.high!, low: currentCandle.low!,
-            close: tick.price, timestamp: currentCandle.timestamp!, volume: currentVolume,
-            isUp: tick.price >= currentCandle.open!
-          });
-          currentCandle = null;
-          currentVolume = 0;
-        }
-      }
-    }
-    if (currentCandle && currentVolume > 0) {
-      candles.push({
-        open: currentCandle.open!, high: currentCandle.high!, low: currentCandle.low!,
-        close: ticks[ticks.length - 1].price, timestamp: currentCandle.timestamp!, volume: currentVolume,
-        isUp: ticks[ticks.length - 1].price >= currentCandle.open!
-      });
-    }
-    return candles;
-  };
-
-  // Adaptive range sizing for weekends/low-volatility periods
+  // Adaptive range sizing for weekends/dead pairs
   const rangesToTry = [40, 20, 10, 5, 2, 1, 0.5, 0.1];
+  let rangeCandles: RangeCandle[] = [];
+  let appliedRangeTicks = TICKS_PER_CANDLE;
   for (const r of rangesToTry) {
     appliedRangeTicks = r;
-    requiredRange = appliedRangeTicks * tickSize;
-    rangeCandles = tryBuildCandles(requiredRange);
+    rangeCandles = buildRangeCandles(ticks, r * tickSize);
     if (rangeCandles.length >= 5) break;
   }
+  if (rangeCandles.length < 5) return null;
+  const requiredRange = appliedRangeTicks * tickSize;
+  const degraded = appliedRangeTicks < TICKS_PER_CANDLE;
 
-  if (rangeCandles.length < 5) return null; // Still not enough movement
-
-  // Process CVD and Volume Profile only once on the ticks array
-  let lastPrice = ticks[0].price;
-  for (const tick of ticks) {
-    if (tick.price > lastPrice) cvd += 1;
-    else if (tick.price < lastPrice) cvd -= 1;
-    lastPrice = tick.price;
-
-    const priceLevel = Math.round(tick.price / tickSize) * tickSize;
-    volumeProfileMap.set(priceLevel, (volumeProfileMap.get(priceLevel) || 0) + 1);
-  }
-
-  // Calculate Volume Profile (POC, VAH, VAL)
-  let totalVolume = 0;
-  let maxVolume = 0;
-  let poc = ticks[0].price;
-
-  for (const [price, vol] of volumeProfileMap.entries()) {
-    totalVolume += vol;
-    if (vol > maxVolume) {
-      maxVolume = vol;
-      poc = price;
-    }
-  }
-
-  // 70% Value Area
-  const targetValueAreaVolume = totalVolume * 0.70;
-  let currentVaVolume = maxVolume;
-  
-  // Sort price levels
-  const sortedLevels = Array.from(volumeProfileMap.keys()).sort((a, b) => a - b);
-  const pocIndex = sortedLevels.indexOf(poc);
-  
-  let upIndex = pocIndex + 1;
-  let downIndex = pocIndex - 1;
-  
-  let vah = poc;
-  let val = poc;
-
-  while (currentVaVolume < targetValueAreaVolume && (upIndex < sortedLevels.length || downIndex >= 0)) {
-    const upPrice = upIndex < sortedLevels.length ? sortedLevels[upIndex] : null;
-    const downPrice = downIndex >= 0 ? sortedLevels[downIndex] : null;
-
-    const upVol = upPrice !== null ? (volumeProfileMap.get(upPrice) || 0) : -1;
-    const downVol = downPrice !== null ? (volumeProfileMap.get(downPrice) || 0) : -1;
-
-    if (upVol >= downVol && upPrice !== null) {
-      currentVaVolume += upVol;
-      vah = upPrice;
-      upIndex++;
-    } else if (downPrice !== null) {
-      currentVaVolume += downVol;
-      val = downPrice;
-      downIndex--;
-    } else {
-        break;
-    }
-  }
+  const binSize = PROFILE_BINS_PER_TICK * tickSize;
+  const { poc, vah, val, lvns } = computeProfile(ticks, binSize);
+  const tickDelta = computeTickDelta(ticks, tickSize);
+  const ib = computeInitialBalance(ticks);
 
   const currentPrice = ticks[ticks.length - 1].price;
   const isInsideValueArea = currentPrice >= val && currentPrice <= vah;
 
-  // Strategy Execution Model 1: Value Area Reversion (The 80% Rule)
-  // If price crossed inside the VAL and is bouncing, buy target POC -> VAH.
-  // We approximate this by seeing if the current price is just inside VAL and pointing up.
-  
-  let signal: "BUY" | "SELL" | "NEUTRAL" = "NEUTRAL";
-  let reasoning = "Market is outside Value Area or chopping without a clear entry setup.";
-  let entryPrice = undefined;
-  let targetPrice = undefined;
-  let stopLoss = undefined;
+  // Market state: EXPANSION if recent candles closed outside VA majority of the time.
+  const RECENT = Math.min(5, rangeCandles.length);
+  const recentOutside = rangeCandles.slice(-RECENT).filter((c) => c.close > vah || c.close < val).length;
+  const marketState: MarketState = recentOutside >= Math.ceil(RECENT * 0.6) ? "EXPANSION" : "BALANCE";
 
   const lastCandle = rangeCandles[rangeCandles.length - 1];
 
-  if (isInsideValueArea) {
-    // If near VAL and last candle was bullish (bouncing)
-    if (currentPrice < val + (requiredRange * 2) && lastCandle.isUp) {
-      // Model 1: Long setup
+  // -------- Signal selection ------------------------------------------------
+  let signal: "BUY" | "SELL" | "NEUTRAL" = "NEUTRAL";
+  let signalModel: FabioSignalModel = "NONE";
+  let reasoning = "Market is outside Value Area or chopping without a clear entry setup.";
+  let entryPrice: number | undefined;
+  let targetPrice: number | undefined;
+  let stopLoss: number | undefined;
+
+  // Model 1: Triple-A (Value Area Reversion / 80% rule)
+  if (marketState === "BALANCE" && isInsideValueArea) {
+    if (currentPrice < val + requiredRange * 2 && lastCandle.isUp && tickDelta > 0) {
       signal = "BUY";
-      reasoning = "Model 1 (Triple-A): Price bounced off Value Area Low (VAL). The 80% rule suggests rotation to the Point of Control (POC) and potentially Value Area High (VAH).";
+      signalModel = "TRIPLE_A_LONG";
+      reasoning =
+        "Triple-A long: price bounced off VAL with positive tick-delta. 80% rule targets POC then VAH.";
       entryPrice = currentPrice;
-      targetPrice = poc; // First target
-      stopLoss = val - requiredRange; // Stop just below VAL
-    }
-    // If near VAH and last candle was bearish (rejecting)
-    else if (currentPrice > vah - (requiredRange * 2) && !lastCandle.isUp) {
+      targetPrice = poc;
+      stopLoss = val - requiredRange;
+    } else if (currentPrice > vah - requiredRange * 2 && !lastCandle.isUp && tickDelta < 0) {
       signal = "SELL";
-      reasoning = "Model 1 (Triple-A): Price rejected off Value Area High (VAH). Rotation back to POC expected.";
+      signalModel = "TRIPLE_A_SHORT";
+      reasoning =
+        "Triple-A short: price rejected at VAH with negative tick-delta. Rotation back to POC expected.";
       entryPrice = currentPrice;
       targetPrice = poc;
       stopLoss = vah + requiredRange;
     } else {
-       reasoning = "Price is inside the Value Area (chop zone). Waiting for a bounce off VAL/VAH or a breakout.";
+      reasoning = "Inside Value Area but not at the extremes. Wait for a VAL bounce or VAH rejection.";
     }
-  } else {
-     // Expansion phase
-     reasoning = "Price is outside the Value Area. Market is in trend/expansion phase. Waiting for pullback.";
   }
 
-  let aiInterpretation = undefined;
-  let aiConfidenceScore = undefined;
+  // Model 2: Absorption / LVN reclaim (expansion phase)
+  if (signalModel === "NONE" && marketState === "EXPANSION" && lvns.length > 0) {
+    const nearest = lvns
+      .map((l) => ({ ...l, dist: Math.abs(currentPrice - l.priceLevel) }))
+      .sort((a, b) => a.dist - b.dist)[0];
+    const within = nearest.dist <= binSize * 2;
+    if (within) {
+      if (currentPrice > vah && lastCandle.isUp && tickDelta > 0) {
+        signal = "BUY";
+        signalModel = "ABSORPTION_LONG";
+        reasoning = `Expansion long: price reclaiming LVN @ ${nearest.priceLevel.toFixed(5)} above VAH.`;
+        entryPrice = currentPrice;
+        targetPrice = currentPrice + (currentPrice - vah) * 1.5;
+        stopLoss = nearest.priceLevel - requiredRange;
+      } else if (currentPrice < val && !lastCandle.isUp && tickDelta < 0) {
+        signal = "SELL";
+        signalModel = "ABSORPTION_SHORT";
+        reasoning = `Expansion short: price rejecting LVN @ ${nearest.priceLevel.toFixed(5)} below VAL.`;
+        entryPrice = currentPrice;
+        targetPrice = currentPrice - (val - currentPrice) * 1.5;
+        stopLoss = nearest.priceLevel + requiredRange;
+      }
+    }
+  }
 
-  // Add AI Analysis Layer
+  // Model 3: Initial Balance breakout
+  if (signalModel === "NONE" && ib.high !== null && ib.low !== null) {
+    if (currentPrice > ib.high && lastCandle.isUp && tickDelta > 0) {
+      signal = "BUY";
+      signalModel = "IB_BREAKOUT_LONG";
+      reasoning = `IB breakout long: price cleared the NY Initial Balance high (${ib.high.toFixed(5)}).`;
+      entryPrice = currentPrice;
+      targetPrice = currentPrice + (ib.high - ib.low);
+      stopLoss = ib.high - requiredRange;
+    } else if (currentPrice < ib.low && !lastCandle.isUp && tickDelta < 0) {
+      signal = "SELL";
+      signalModel = "IB_BREAKOUT_SHORT";
+      reasoning = `IB breakout short: price broke the NY Initial Balance low (${ib.low.toFixed(5)}).`;
+      entryPrice = currentPrice;
+      targetPrice = currentPrice - (ib.high - ib.low);
+      stopLoss = ib.low + requiredRange;
+    }
+  }
+
+  // -------- AI interpretation (cached on bucketed state) -------------------
+  let aiInterpretation: string | undefined;
+  let aiConfidenceScore: number | undefined;
   try {
     const decimals = pair.includes("JPY") ? 3 : 5;
-    
-    // Create a deterministic cache key based on the exact mechanical state
-    const stateKey = `${pair}_${currentPrice.toFixed(decimals)}_${vah.toFixed(decimals)}_${poc.toFixed(decimals)}_${val.toFixed(decimals)}_${cvd}_${lastCandle.isUp}_${signal}`;
-    
-    if (aiCache.has(stateKey)) {
-      const cached = aiCache.get(stateKey)!;
+    const round = (n: number) => Math.round(n / binSize) * binSize;
+    const bucketedDelta = Math.round(tickDelta / 25);
+    const stateKey = [
+      pair,
+      round(currentPrice).toFixed(decimals),
+      round(vah).toFixed(decimals),
+      round(poc).toFixed(decimals),
+      round(val).toFixed(decimals),
+      bucketedDelta,
+      marketState,
+      signalModel,
+    ].join("|");
+
+    const cached = aiCache.get(stateKey);
+    if (cached) {
       aiInterpretation = cached.interpretation;
       aiConfidenceScore = cached.score;
     } else {
-      const sysPrompt = "You are Fabio, an elite order flow and tape reader. You trade exclusively via 40-Range charts and Volume Profile (Auction Market Theory). Analyze the provided state, determine if it's a high probability setup based on the 'Triple-A' 80% rule or Absorption & Squeeze. Respond with a sharp, professional desk commentary analyzing the setup (max 4 sentences). End your response with a confidence score on a new line formatted exactly as: [SCORE: X/100].";
-      
+      const sysPrompt =
+        "You are Fabio, an elite order-flow / Auction Market Theory tape reader. Respond with sharp desk commentary (max 4 sentences) judging whether the current state is a high-probability setup under either the Triple-A 80% rule, an LVN absorption squeeze, or an IB breakout. End with a confidence score on a new line formatted exactly as: [SCORE: X/100].";
       const userMsg = `PAIR: ${pair}
-CURRENT PRICE: ${currentPrice.toFixed(decimals)}
-VALUE AREA HIGH (VAH): ${vah.toFixed(decimals)}
-POINT OF CONTROL (POC): ${poc.toFixed(decimals)}
-VALUE AREA LOW (VAL): ${val.toFixed(decimals)}
-CUMULATIVE DELTA (CVD): ${cvd} (Aggression: ${cvd > 0 ? 'Buy' : cvd < 0 ? 'Sell' : 'Neutral'})
-LAST 40-RANGE CANDLE: ${lastCandle.isUp ? 'BULLISH' : 'BEARISH'} (C: ${lastCandle.close.toFixed(decimals)})
-INSIDE VALUE AREA: ${isInsideValueArea ? 'YES' : 'NO'}
-MECHANICAL SIGNAL: ${signal}
+PRICE: ${currentPrice.toFixed(decimals)}
+VAH/POC/VAL: ${vah.toFixed(decimals)} / ${poc.toFixed(decimals)} / ${val.toFixed(decimals)}
+MARKET STATE: ${marketState}
+TICK-DELTA PROXY: ${tickDelta} (${tickDelta > 0 ? "buy-pressure" : tickDelta < 0 ? "sell-pressure" : "flat"}) — note: spot FX has no real CVD, this is a proxy.
+LAST RANGE-CANDLE: ${lastCandle.isUp ? "BULLISH" : "BEARISH"} close ${lastCandle.close.toFixed(decimals)}
+INSIDE VA: ${isInsideValueArea ? "YES" : "NO"}
+IB HIGH/LOW: ${ib.high !== null ? ib.high.toFixed(decimals) : "n/a"} / ${ib.low !== null ? ib.low.toFixed(decimals) : "n/a"}
+APPLIED RANGE: ${appliedRangeTicks} ticks${degraded ? " (DEGRADED — low volatility)" : ""}
+MECHANICAL SIGNAL: ${signal} (${signalModel})
 MECHANICAL REASONING: ${reasoning}`;
 
       const aiRes = await callGLM(sysPrompt, userMsg, 600, 0.25);
-      
       if (aiRes) {
-        // Extract score
-        const scoreMatch = aiRes.match(/\[SCORE:\s*(\d+)\/100\]/i);
-        if (scoreMatch && scoreMatch[1]) {
-          aiConfidenceScore = parseInt(scoreMatch[1], 10);
-        }
-        // Remove score from the text for the interpretation
-        aiInterpretation = aiRes.replace(/\[SCORE:\s*\d+\/100\]/i, '').trim();
-        
+        const m = aiRes.match(/\[SCORE:\s*(\d+)\/100\]/i);
+        if (m && m[1]) aiConfidenceScore = parseInt(m[1], 10);
+        aiInterpretation = aiRes.replace(/\[SCORE:\s*\d+\/100\]/i, "").trim();
         if (aiInterpretation && aiConfidenceScore !== undefined) {
-          // Store in cache to keep it stable until the state changes
           aiCache.set(stateKey, { interpretation: aiInterpretation, score: aiConfidenceScore });
-          // Optional: clear cache if it gets too large
           if (aiCache.size > 1000) aiCache.clear();
         }
       }
@@ -293,13 +409,21 @@ MECHANICAL REASONING: ${reasoning}`;
     poc,
     currentPrice,
     isInsideValueArea,
+    marketState,
     signal,
+    signalModel,
     reasoning,
     aiInterpretation,
     aiConfidenceScore,
     entryPrice,
     targetPrice,
     stopLoss,
-    cvd
+    tickDelta,
+    lvns,
+    ibHigh: ib.high,
+    ibLow: ib.low,
+    appliedRangeTicks,
+    binSize,
+    degraded,
   };
 }

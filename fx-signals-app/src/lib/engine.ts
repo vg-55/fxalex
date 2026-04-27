@@ -18,6 +18,19 @@ export type SignalFactors = {
   aiBoost: number;         // 0–15  contextual AI quality score
   /** Weekly bias stored in JSONB factors to avoid DB column migration */
   weeklyBias?: WeeklyBias;
+  /**
+   * Frozen entry snapshot. Stamped the moment status first becomes ACTIVE
+   * and preserved across scans until TP/SL closes the trade.
+   * Lets the home card show stable Entry/SL/TP and a real time-since-entry,
+   * even if price briefly leaves the AOI.
+   */
+  _locked?: {
+    at: string;        // ISO timestamp of first ACTIVE
+    entry: number;
+    sl: number;
+    tp: number;
+    type: "BUY" | "SELL";
+  };
 };
 
 export type EngineSignal = {

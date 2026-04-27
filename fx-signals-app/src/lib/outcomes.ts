@@ -11,13 +11,14 @@ type ActiveSignal = typeof schema.signals.$inferSelect;
 /**
  * For a signal that WAS ACTIVE last scan, walk the ticks since it went ACTIVE
  * and decide if price reached TP or SL. If neither, no outcome yet.
- * Returns the number of outcomes written.
+ * Returns the set of pairs that produced an outcome this scan.
  */
 export async function evaluateOutcomes(
   prevActive: ActiveSignal[],
   nowSignals: Map<string, { status: string }>
-): Promise<number> {
+): Promise<{ written: number; closedPairs: Set<string> }> {
   let written = 0;
+  const closedPairs = new Set<string>();
 
   for (const prev of prevActive) {
     if (prev.status !== "ACTIVE") continue;
@@ -25,8 +26,18 @@ export async function evaluateOutcomes(
     // Only close when it's no longer ACTIVE (moved away / hit something)
     if (next && next.status === "ACTIVE") continue;
 
-    // Look at ticks since this signal was last marked ACTIVE
-    const since = prev.updatedAt;
+    // Anchor to first-ACTIVE timestamp from the locked snapshot when present;
+    // fall back to prev.updatedAt for legacy rows.
+    const factors = (prev.factors ?? {}) as { _locked?: { at: string; entry: number; sl: number; tp: number; type: "BUY" | "SELL" } };
+    const lockedAt = factors._locked?.at ? new Date(factors._locked.at) : null;
+    const since = lockedAt && !Number.isNaN(lockedAt.getTime()) ? lockedAt : prev.updatedAt;
+
+    // Use frozen levels (the trade's actual entry, not a recomputed value).
+    const entry = factors._locked?.entry ?? prev.price;
+    const sl = factors._locked?.sl ?? prev.sl;
+    const tp = factors._locked?.tp ?? prev.tp;
+    const isBuy = (factors._locked?.type ?? prev.type) === "BUY";
+
     const ticks = await db
       .select({
         price: schema.priceTicks.price,
@@ -46,11 +57,6 @@ export async function evaluateOutcomes(
 
     // Walk oldest → newest
     ticks.reverse();
-
-    const entry = prev.price;
-    const sl = prev.sl;
-    const tp = prev.tp;
-    const isBuy = prev.type === "BUY";
 
     let result: OutcomeResult | null = null;
     let hitAt: Date | null = null;
@@ -84,7 +90,16 @@ export async function evaluateOutcomes(
 
     if (!result || !hitAt) continue;
 
-    const rPnl = result === "TP" ? 2 : -1;
+    // R-multiple = (exit − entry) / risk-per-unit, sign-flipped for shorts.
+    // risk = |entry − sl|. exit = tp on TP, sl on SL.
+    const risk = Math.abs(entry - sl);
+    const rPnl = (() => {
+      if (risk === 0) return result === "TP" ? 1 : -1; // degenerate guard
+      const exit = result === "TP" ? tp : sl;
+      const raw = (exit - entry) / risk;
+      return isBuy ? raw : -raw;
+    })();
+
     const holdMinutes = Math.max(
       0,
       Math.round((hitAt.getTime() - since.getTime()) / 60_000)
@@ -92,7 +107,7 @@ export async function evaluateOutcomes(
 
     await db.insert(schema.signalOutcomes).values({
       pair: prev.pair,
-      type: prev.type,
+      type: factors._locked?.type ?? prev.type,
       entry,
       sl,
       tp,
@@ -102,8 +117,9 @@ export async function evaluateOutcomes(
       closedAt: hitAt,
       holdMinutes,
     });
+    closedPairs.add(prev.pair);
     written++;
   }
 
-  return written;
+  return { written, closedPairs };
 }
