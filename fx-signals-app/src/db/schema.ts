@@ -321,6 +321,44 @@ export const mt5Audit = pgTable(
   })
 );
 
+// ---------------------------------------------------------------------------
+// ctrader_accounts — Spotware Open API connections (OAuth-based, no broker pwd)
+// ---------------------------------------------------------------------------
+export const ctraderAccounts = pgTable("ctrader_accounts", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  label: text("label").notNull(),
+  // Spotware identifiers
+  ctidTraderAccountId: text("ctid_trader_account_id").notNull(), // numeric, e.g. "10000372"
+  traderLogin: text("trader_login"),                              // human login
+  brokerName: text("broker_name"),                                // e.g. "IC Markets Raw Spread"
+  isLive: boolean("is_live").notNull().default(false),
+  // OAuth tokens (encrypted via AES-GCM, same key as MT5)
+  accessTokenEnc: text("access_token_enc").notNull(),
+  refreshTokenEnc: text("refresh_token_enc").notNull(),
+  tokenExpiresAt: timestamp("token_expires_at", { withTimezone: true }).notNull(),
+  scope: text("scope"),
+  // Mode + filters (mirrors mt5_accounts)
+  mode: text("mode").notNull().default("OFF"), // OFF | SHADOW | LIVE
+  strategies: jsonb("strategies").notNull().default(sql`'["COMBINED"]'::jsonb`),
+  symbols: jsonb("symbols"),
+  riskPctPerTrade: doublePrecision("risk_pct_per_trade").notNull().default(0.5),
+  maxConcurrent: integer("max_concurrent").notNull().default(3),
+  maxDailyLossPct: doublePrecision("max_daily_loss_pct").notNull().default(3),
+  maxLot: doublePrecision("max_lot").notNull().default(1),
+  minRR: doublePrecision("min_rr").notNull().default(1.5),
+  // Live snapshot
+  balance: doublePrecision("balance"),
+  equity: doublePrecision("equity"),
+  margin: doublePrecision("margin"),
+  marginLevel: doublePrecision("margin_level"),
+  currency: text("currency"),
+  lastSyncedAt: timestamp("last_synced_at", { withTimezone: true }),
+  lastError: text("last_error"),
+  enabled: boolean("enabled").notNull().default(true),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
 export type Instrument = typeof instruments.$inferSelect;
 export type SignalRow = typeof signals.$inferSelect;
 export type NotificationRow = typeof notifications.$inferSelect;
@@ -330,3 +368,4 @@ export type SignalOutcomeRow = typeof signalOutcomes.$inferSelect;
 export type Mt5AccountRow = typeof mt5Accounts.$inferSelect;
 export type Mt5OrderRow = typeof mt5Orders.$inferSelect;
 export type Mt5AuditRow = typeof mt5Audit.$inferSelect;
+export type CtraderAccountRow = typeof ctraderAccounts.$inferSelect;

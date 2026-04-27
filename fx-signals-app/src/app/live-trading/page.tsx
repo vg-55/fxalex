@@ -86,6 +86,25 @@ type AuditRow = {
 
 type Tab = "overview" | "risk" | "strategy" | "orders" | "audit";
 
+type CtraderAccount = {
+  id: string;
+  label: string;
+  ctidTraderAccountId: string;
+  traderLogin: string | null;
+  brokerName: string | null;
+  isLive: boolean;
+  tokenExpiresAt: string;
+  mode: Mode;
+  strategies: Strategy[];
+  balance: number | null;
+  equity: number | null;
+  currency: string | null;
+  lastSyncedAt: string | null;
+  lastError: string | null;
+  enabled: boolean;
+  createdAt: string;
+};
+
 const STRATEGY_META: Record<Strategy, { label: string; icon: React.ReactNode; tone: string }> = {
   ALEX: { label: "Alex G", icon: <Target size={14} />, tone: "blue" },
   FABIO: { label: "Fabio", icon: <Layers size={14} />, tone: "purple" },
@@ -99,6 +118,8 @@ const REGIONS = ["new-york", "london", "singapore"];
 // ---------------------------------------------------------------------------
 export default function LiveTradingPage() {
   const [accounts, setAccounts] = useState<Account[]>([]);
+  const [ctraderAccounts, setCtraderAccounts] = useState<CtraderAccount[]>([]);
+  const [ctraderConfigured, setCtraderConfigured] = useState(true);
   const [configured, setConfigured] = useState<{ crypto: boolean; metaapi: boolean }>({
     crypto: true,
     metaapi: true,
@@ -136,11 +157,30 @@ export default function LiveTradingPage() {
     }
   }, []);
 
+  const loadCtrader = useCallback(async () => {
+    try {
+      const res = await fetch("/api/ctrader/accounts", { cache: "no-store" });
+      if (!res.ok) return;
+      const json = (await res.json()) as {
+        accounts: CtraderAccount[];
+        configured: { crypto: boolean; ctrader: boolean };
+      };
+      setCtraderAccounts(json.accounts);
+      setCtraderConfigured(json.configured.ctrader);
+    } catch {
+      // Non-fatal — cTrader panel is optional.
+    }
+  }, []);
+
   useEffect(() => {
     load();
-    const id = setInterval(load, 30_000);
+    loadCtrader();
+    const id = setInterval(() => {
+      load();
+      loadCtrader();
+    }, 30_000);
     return () => clearInterval(id);
-  }, [load]);
+  }, [load, loadCtrader]);
 
   const selected = accounts.find((a) => a.id === selectedId) ?? null;
   const liveCount = accounts.filter((a) => a.mode === "LIVE").length;
@@ -167,11 +207,22 @@ export default function LiveTradingPage() {
           <div className="flex items-center gap-2">
             {liveCount > 0 && <PauseAllButton accounts={accounts} onDone={load} />}
             <button
+              onClick={() => {
+                window.location.href = "/api/ctrader/auth/start";
+              }}
+              disabled={!ctraderConfigured}
+              title={ctraderConfigured ? "Connect cTrader account via OAuth" : "CTRADER_CLIENT_ID not configured"}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 hover:bg-emerald-500/25 text-xs font-semibold disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              <Zap size={13} />
+              Connect cTrader
+            </button>
+            <button
               onClick={() => setShowAdd(true)}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-500/15 text-blue-300 border border-blue-500/30 hover:bg-blue-500/25 text-xs font-semibold"
             >
               <Plus size={13} />
-              Add account
+              Add MT5
             </button>
           </div>
         </div>
@@ -241,6 +292,8 @@ export default function LiveTradingPage() {
               />
             ))
           )}
+
+          <CtraderPanel accounts={ctraderAccounts} onChange={loadCtrader} />
         </div>
 
         {/* Detail panel */}
@@ -1268,6 +1321,86 @@ function Field({
       <label className="text-[11px] font-semibold text-slate-300 mb-1 block">{label}</label>
       {children}
       {hint && <div className="text-[10px] text-slate-600 mt-1">{hint}</div>}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// cTrader panel — read-only Phase 1 view of OAuth-linked Spotware accounts.
+// Order placement requires a long-lived protobuf TCP client (Phase 2), so we
+// just list the connected trader accounts + let the user disconnect them.
+// ---------------------------------------------------------------------------
+function CtraderPanel({
+  accounts,
+  onChange,
+}: {
+  accounts: CtraderAccount[];
+  onChange: () => void;
+}) {
+  if (accounts.length === 0) return null;
+  return (
+    <div className="mt-4 space-y-2">
+      <div className="flex items-center gap-2 px-1">
+        <Zap size={12} className="text-emerald-400" />
+        <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
+          cTrader · {accounts.length}
+        </span>
+      </div>
+      {accounts.map((a) => (
+        <CtraderListItem key={a.id} account={a} onChange={onChange} />
+      ))}
+    </div>
+  );
+}
+
+function CtraderListItem({
+  account,
+  onChange,
+}: {
+  account: CtraderAccount;
+  onChange: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const expired = new Date(account.tokenExpiresAt).getTime() < Date.now();
+
+  async function disconnect() {
+    if (!confirm(`Disconnect ${account.label}? You can reconnect any time.`)) return;
+    setBusy(true);
+    try {
+      await fetch(`/api/ctrader/accounts/${account.id}`, { method: "DELETE" });
+      onChange();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="rounded-xl border border-emerald-500/15 bg-emerald-500/[0.03] p-3">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="text-xs font-semibold text-white truncate">{account.label}</div>
+          <div className="text-[10px] text-slate-500 font-mono truncate">
+            {account.brokerName ?? "cTrader"} · #{account.traderLogin ?? account.ctidTraderAccountId}
+            {account.isLive ? " · LIVE" : " · DEMO"}
+          </div>
+          {expired && (
+            <div className="text-[10px] text-amber-400 mt-1">
+              Token expired — reconnect via &ldquo;Connect cTrader&rdquo;
+            </div>
+          )}
+          {account.lastError && (
+            <div className="text-[10px] text-rose-400 mt-1 line-clamp-2">{account.lastError}</div>
+          )}
+        </div>
+        <button
+          onClick={disconnect}
+          disabled={busy}
+          className="text-[10px] px-2 py-1 rounded-md bg-rose-500/10 text-rose-300 border border-rose-500/20 hover:bg-rose-500/20 disabled:opacity-50 shrink-0"
+          title="Remove this connection"
+        >
+          <Trash2 size={11} />
+        </button>
+      </div>
     </div>
   );
 }
