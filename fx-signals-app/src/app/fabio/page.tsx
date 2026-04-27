@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { type FabioAnalysis } from "@/lib/fabio";
-import { Activity, Target, Shield, ArrowUpRight, ArrowDownRight, RefreshCw, BarChart2 } from "lucide-react";
+import { Activity, Target, Shield, ArrowUpRight, ArrowDownRight, RefreshCw, Globe } from "lucide-react";
 import { clsx } from "clsx";
 
 function FabioCard({ pair }: { pair: string }) {
@@ -161,7 +161,7 @@ export default function FabioPage() {
 
   return (
     <div className="p-6 max-w-7xl mx-auto space-y-6">
-      <div className="mb-8">
+      <div className="mb-4">
         <h1 className="text-3xl font-bold tracking-tight">Fabio's 40-Range System</h1>
         <p className="text-zinc-400 mt-1">Live Order Flow & Auction Market Theory</p>
       </div>

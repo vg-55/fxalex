@@ -9,6 +9,7 @@ import { AccountProvider, useAccount } from "@/lib/account-context";
 import HealthBadge from "@/components/HealthBadge";
 import NotificationCenter, { type NotificationItem } from "@/components/NotificationCenter";
 import SettingsDrawer from "@/components/SettingsDrawer";
+import MarketSessions from "@/components/MarketSessions";
 
 function StatusDot() {
   const { status, error } = useLiveStatus();
@@ -175,8 +176,11 @@ function Shell({ children }: { children: ReactNode }) {
       </header>
 
       {/* Main */}
-      <main className="flex-1 min-w-0 overflow-auto pt-14 md:pt-0 pb-16 md:pb-0">
-        {children}
+      <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
+        <MarketSessions />
+        <div className="flex-1 overflow-auto pt-14 md:pt-0 pb-16 md:pb-0">
+          {children}
+        </div>
       </main>
 
       {/* Mobile bottom nav */}
