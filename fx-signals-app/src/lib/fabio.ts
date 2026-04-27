@@ -283,22 +283,37 @@ export async function getFabioAnalysis(pair: CandlePair): Promise<FabioAnalysis 
   let stopLoss: number | undefined;
 
   // Model 1: Triple-A (Value Area Reversion / 80% rule)
+  // For LONG we need price near VAL *and below POC* so the rotation target
+  // (VAH) is on the correct side of entry; symmetric for SHORT. Without the
+  // POC-side guard we'd emit BUYs with TP < entry whenever price drifted
+  // above POC but remained inside the VA — the bug that produced the
+  // EURUSD/USDJPY no-fill signals on /fabio-live.
   if (marketState === "BALANCE" && isInsideValueArea) {
-    if (currentPrice < val + requiredRange * 2 && lastCandle.isUp && tickDelta > 0) {
+    if (
+      currentPrice < poc &&
+      currentPrice < val + requiredRange * 2 &&
+      lastCandle.isUp &&
+      tickDelta > 0
+    ) {
       signal = "BUY";
       signalModel = "TRIPLE_A_LONG";
       reasoning =
-        "Triple-A long: price bounced off VAL with positive tick-delta. 80% rule targets POC then VAH.";
+        "Triple-A long: price bounced off VAL with positive tick-delta. 80% rule targets the opposite VA extreme (VAH).";
       entryPrice = currentPrice;
-      targetPrice = poc;
+      targetPrice = vah;
       stopLoss = val - requiredRange;
-    } else if (currentPrice > vah - requiredRange * 2 && !lastCandle.isUp && tickDelta < 0) {
+    } else if (
+      currentPrice > poc &&
+      currentPrice > vah - requiredRange * 2 &&
+      !lastCandle.isUp &&
+      tickDelta < 0
+    ) {
       signal = "SELL";
       signalModel = "TRIPLE_A_SHORT";
       reasoning =
-        "Triple-A short: price rejected at VAH with negative tick-delta. Rotation back to POC expected.";
+        "Triple-A short: price rejected at VAH with negative tick-delta. 80% rule targets the opposite VA extreme (VAL).";
       entryPrice = currentPrice;
-      targetPrice = poc;
+      targetPrice = val;
       stopLoss = vah + requiredRange;
     } else {
       reasoning = "Inside Value Area but not at the extremes. Wait for a VAL bounce or VAH rejection.";

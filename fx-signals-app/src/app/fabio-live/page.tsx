@@ -605,8 +605,45 @@ function FabioMiniCard({ pair }: { pair: string }) {
       </div>
       {a && a.signal !== "NEUTRAL" ? (
         <>
-          <div className="text-[10px] text-purple-300 font-mono mb-1.5">
-            {a.signalModel.replace(/_/g, " ")}
+          <div className="flex items-center justify-between mb-1.5">
+            <div className="text-[10px] text-purple-300 font-mono">
+              {a.signalModel.replace(/_/g, " ")}
+            </div>
+            {(() => {
+              if (
+                a.entryPrice == null ||
+                a.stopLoss == null ||
+                a.targetPrice == null
+              )
+                return null;
+              const stop = Math.abs(a.entryPrice - a.stopLoss);
+              const reward = Math.abs(a.targetPrice - a.entryPrice);
+              const rr = stop > 0 ? reward / stop : 0;
+              const dirOk =
+                a.signal === "BUY"
+                  ? a.targetPrice > a.entryPrice && a.stopLoss < a.entryPrice
+                  : a.targetPrice < a.entryPrice && a.stopLoss > a.entryPrice;
+              const tone = !dirOk
+                ? "bg-rose-500/15 text-rose-300 border-rose-500/30"
+                : rr >= 1.5
+                ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"
+                : "bg-amber-500/15 text-amber-300 border-amber-500/30";
+              const label = !dirOk ? "BAD GEOM" : `RR ${rr.toFixed(2)}`;
+              return (
+                <span
+                  className={`text-[9px] font-mono font-bold px-1.5 py-0.5 rounded border ${tone}`}
+                  title={
+                    !dirOk
+                      ? "TP/SL on wrong side of entry — fan-out will reject."
+                      : rr < 1.5
+                      ? "Below typical bridge minRR (1.5) — fan-out will skip."
+                      : "Will queue if all gates pass."
+                  }
+                >
+                  {label}
+                </span>
+              );
+            })()}
           </div>
           <div className="grid grid-cols-3 gap-2 text-[10px] font-mono">
             <KV label="Entry" value={fmt(a.entryPrice)} tone="white" />

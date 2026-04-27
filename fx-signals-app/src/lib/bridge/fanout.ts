@@ -183,12 +183,33 @@ export async function fanOutFabioSignalToBridges(
   }
 
   const stopDistance = Math.abs(signal.entry - signal.sl);
-  if (stopDistance <= 0) return 0;
+  if (stopDistance <= 0) {
+    console.warn(`[fabio] reject ${signal.pair} ${signal.side} (${signal.model}): zero stop distance`);
+    return 0;
+  }
+
+  // Direction sanity — for BUY, TP must be above entry and SL below; symmetric
+  // for SELL. Catches model bugs (e.g. Triple-A TP on the wrong side of POC)
+  // before they hit the order book.
+  const tpOnRightSide =
+    signal.side === "BUY"
+      ? signal.tp > signal.entry && signal.sl < signal.entry
+      : signal.tp < signal.entry && signal.sl > signal.entry;
+  if (!tpOnRightSide) {
+    console.warn(
+      `[fabio] reject ${signal.pair} ${signal.side} (${signal.model}): invalid geometry — entry=${signal.entry} sl=${signal.sl} tp=${signal.tp}`
+    );
+    return 0;
+  }
+
   const rr = Math.abs(signal.tp - signal.entry) / stopDistance;
 
   for (const acc of candidates) {
     try {
-      if (isHeartbeatStale(acc)) continue;
+      if (isHeartbeatStale(acc)) {
+        console.warn(`[fabio] skip acc=${acc.id}: heartbeat stale`);
+        continue;
+      }
 
       // FABIO-only lane: must explicitly subscribe to FABIO.
       const strategies = Array.isArray(acc.strategies) ? (acc.strategies as string[]) : [];
@@ -196,10 +217,21 @@ export async function fanOutFabioSignalToBridges(
 
       if (Array.isArray(acc.symbols) && acc.symbols.length > 0) {
         const allow = acc.symbols as string[];
-        if (!allow.includes(signal.pair)) continue;
+        if (!allow.includes(signal.pair)) {
+          console.warn(`[fabio] skip acc=${acc.id} ${signal.pair}: not in symbol allow-list`);
+          continue;
+        }
       }
-      if (rr < acc.minRR) continue;
-      if (acc.balance == null || acc.balance <= 0) continue;
+      if (rr < acc.minRR) {
+        console.warn(
+          `[fabio] skip acc=${acc.id} ${signal.pair} ${signal.side} (${signal.model}): RR ${rr.toFixed(2)} < minRR ${acc.minRR}`
+        );
+        continue;
+      }
+      if (acc.balance == null || acc.balance <= 0) {
+        console.warn(`[fabio] skip acc=${acc.id}: balance not yet reported`);
+        continue;
+      }
 
       const inflight = await db
         .select({ n: sql<number>`count(*)::int` })
@@ -211,7 +243,10 @@ export async function fanOutFabioSignalToBridges(
           )
         );
       const openCount = inflight[0]?.n ?? 0;
-      if (openCount >= acc.maxConcurrent) continue;
+      if (openCount >= acc.maxConcurrent) {
+        console.warn(`[fabio] skip acc=${acc.id} ${signal.pair}: at maxConcurrent (${openCount}/${acc.maxConcurrent})`);
+        continue;
+      }
 
       // Daily-loss circuit breaker.
       const todayStart = todayBoundaryUtc();
@@ -227,7 +262,10 @@ export async function fanOutFabioSignalToBridges(
       const cumulativePnl = dayPnl[0]?.pnl ?? 0;
       const lossPct =
         cumulativePnl < 0 ? (Math.abs(cumulativePnl) / acc.balance) * 100 : 0;
-      if (lossPct >= acc.maxDailyLossPct) continue;
+      if (lossPct >= acc.maxDailyLossPct) {
+        console.warn(`[fabio] skip acc=${acc.id}: daily-loss circuit-breaker tripped (${lossPct.toFixed(2)}%)`);
+        continue;
+      }
 
       // Dedupe — same pair+side already in flight or recently filed.
       const dedupeSince = new Date(Date.now() - FABIO_DEDUPE_MS);
@@ -243,7 +281,7 @@ export async function fanOutFabioSignalToBridges(
             gte(schema.bridgeOrders.createdAt, dedupeSince)
           )
         );
-      if ((existing[0]?.n ?? 0) > 0) continue;
+      if ((existing[0]?.n ?? 0) > 0) continue; // common, no log spam
 
       const lot = approxLots(
         acc.balance,
@@ -252,7 +290,10 @@ export async function fanOutFabioSignalToBridges(
         signal.pair,
         acc.maxLot
       );
-      if (lot <= 0) continue;
+      if (lot <= 0) {
+        console.warn(`[fabio] skip acc=${acc.id} ${signal.pair}: computed lot <= 0`);
+        continue;
+      }
 
       await db.insert(schema.bridgeOrders).values({
         accountId: acc.id,
@@ -265,6 +306,9 @@ export async function fanOutFabioSignalToBridges(
         sl: signal.sl,
         tp: signal.tp,
       });
+      console.info(
+        `[fabio] queued ${signal.pair} ${signal.side} (${signal.model}) lot=${lot} RR=${rr.toFixed(2)} → acc=${acc.id}`
+      );
       fanned++;
     } catch (err) {
       console.warn(`[bridge] fabio fan-out: account ${acc.id} failed`, err);
