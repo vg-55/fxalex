@@ -143,3 +143,155 @@ export async function fanOutSignalToBridges(signal: EngineSignal): Promise<numbe
   }
   return fanned;
 }
+
+// ---------------------------------------------------------------------------
+// Fabio fan-out — queues Fabio order-flow signals to FABIO-strategy bridges.
+// Used by the dedicated /fabio-live execution lane.
+// ---------------------------------------------------------------------------
+export type FabioBridgeSignal = {
+  pair: string;
+  side: "BUY" | "SELL";
+  entry: number;
+  sl: number;
+  tp: number;
+  model: string; // FabioSignalModel — e.g. TRIPLE_A_LONG, IB_BREAKOUT_SHORT
+};
+
+// Skip queuing if the same FABIO signal (pair+side) already has an open or
+// queued order on this account within the last DEDUPE window. Prevents the
+// scanner re-firing every minute on the same range candle.
+const FABIO_DEDUPE_MS = 60 * 60_000; // 1 hour
+
+export async function fanOutFabioSignalToBridges(
+  signal: FabioBridgeSignal
+): Promise<number> {
+  let fanned = 0;
+  let candidates: BridgeAccountRow[];
+  try {
+    candidates = await db
+      .select()
+      .from(schema.bridgeAccounts)
+      .where(
+        and(
+          eq(schema.bridgeAccounts.enabled, true),
+          eq(schema.bridgeAccounts.mode, "LIVE")
+        )
+      );
+  } catch (err) {
+    console.warn("[bridge] fabio fan-out: select accounts failed", err);
+    return 0;
+  }
+
+  const stopDistance = Math.abs(signal.entry - signal.sl);
+  if (stopDistance <= 0) return 0;
+  const rr = Math.abs(signal.tp - signal.entry) / stopDistance;
+
+  for (const acc of candidates) {
+    try {
+      if (isHeartbeatStale(acc)) continue;
+
+      // FABIO-only lane: must explicitly subscribe to FABIO.
+      const strategies = Array.isArray(acc.strategies) ? (acc.strategies as string[]) : [];
+      if (!strategies.includes("FABIO")) continue;
+
+      if (Array.isArray(acc.symbols) && acc.symbols.length > 0) {
+        const allow = acc.symbols as string[];
+        if (!allow.includes(signal.pair)) continue;
+      }
+      if (rr < acc.minRR) continue;
+      if (acc.balance == null || acc.balance <= 0) continue;
+
+      const inflight = await db
+        .select({ n: sql<number>`count(*)::int` })
+        .from(schema.bridgeOrders)
+        .where(
+          and(
+            eq(schema.bridgeOrders.accountId, acc.id),
+            inArray(schema.bridgeOrders.status, ["QUEUED", "SENT", "FILLED"])
+          )
+        );
+      const openCount = inflight[0]?.n ?? 0;
+      if (openCount >= acc.maxConcurrent) continue;
+
+      // Daily-loss circuit breaker.
+      const todayStart = todayBoundaryUtc();
+      const dayPnl = await db
+        .select({ pnl: sql<number>`coalesce(sum(${schema.bridgeOrders.pnl}), 0)::float` })
+        .from(schema.bridgeOrders)
+        .where(
+          and(
+            eq(schema.bridgeOrders.accountId, acc.id),
+            gte(schema.bridgeOrders.createdAt, todayStart)
+          )
+        );
+      const cumulativePnl = dayPnl[0]?.pnl ?? 0;
+      const lossPct =
+        cumulativePnl < 0 ? (Math.abs(cumulativePnl) / acc.balance) * 100 : 0;
+      if (lossPct >= acc.maxDailyLossPct) continue;
+
+      // Dedupe — same pair+side already in flight or recently filed.
+      const dedupeSince = new Date(Date.now() - FABIO_DEDUPE_MS);
+      const existing = await db
+        .select({ n: sql<number>`count(*)::int` })
+        .from(schema.bridgeOrders)
+        .where(
+          and(
+            eq(schema.bridgeOrders.accountId, acc.id),
+            eq(schema.bridgeOrders.symbol, signal.pair),
+            eq(schema.bridgeOrders.side, signal.side),
+            eq(schema.bridgeOrders.signalSource, "FABIO"),
+            gte(schema.bridgeOrders.createdAt, dedupeSince)
+          )
+        );
+      if ((existing[0]?.n ?? 0) > 0) continue;
+
+      const lot = approxLots(
+        acc.balance,
+        acc.riskPctPerTrade,
+        stopDistance,
+        signal.pair,
+        acc.maxLot
+      );
+      if (lot <= 0) continue;
+
+      await db.insert(schema.bridgeOrders).values({
+        accountId: acc.id,
+        signalSource: "FABIO",
+        status: "QUEUED",
+        symbol: signal.pair,
+        side: signal.side,
+        requestedLot: lot,
+        entry: signal.entry,
+        sl: signal.sl,
+        tp: signal.tp,
+      });
+      fanned++;
+    } catch (err) {
+      console.warn(`[bridge] fabio fan-out: account ${acc.id} failed`, err);
+    }
+  }
+  return fanned;
+}
+
+// Cheap pre-check used by the scanner to avoid running getFabioAnalysis (which
+// hits the GLM API + price-tick history) when no live FABIO bridges exist.
+export async function hasLiveFabioBridges(): Promise<boolean> {
+  try {
+    const rows = await db
+      .select({ strategies: schema.bridgeAccounts.strategies })
+      .from(schema.bridgeAccounts)
+      .where(
+        and(
+          eq(schema.bridgeAccounts.enabled, true),
+          eq(schema.bridgeAccounts.mode, "LIVE")
+        )
+      );
+    for (const r of rows) {
+      const s = Array.isArray(r.strategies) ? (r.strategies as string[]) : [];
+      if (s.includes("FABIO")) return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}

@@ -10,7 +10,8 @@ import { computeAoi, pickAoiForBias, shouldReplaceAoi } from "./aoi";
 import { refreshNewsIfStale, nextRelevantEvent } from "./news";
 import { evaluateOutcomes } from "./outcomes";
 import { pushExternal } from "./notifier";
-import { fanOutSignalToBridges } from "./bridge/fanout";
+import { fanOutSignalToBridges, fanOutFabioSignalToBridges, hasLiveFabioBridges } from "./bridge/fanout";
+import { getFabioAnalysis } from "./fabio";
 
 export type ScanSummary = {
   ok: boolean;
@@ -539,6 +540,45 @@ export async function runScanOnce(): Promise<ScanSummary> {
           backoffUntil: null,
         },
       });
+
+    // ── Fabio fan-out ──────────────────────────────────────────────────────
+    // Independent of the Alex/COMBINED engine: runs the Fabio order-flow
+    // analysis on each enabled instrument and queues orders to bridge
+    // accounts that have explicitly subscribed to FABIO. Skipped entirely
+    // when no live FABIO bridge exists, so the GLM cost only kicks in for
+    // users running the dedicated Fabio lane.
+    try {
+      if (await hasLiveFabioBridges()) {
+        await Promise.all(
+          instruments.map(async (inst) => {
+            try {
+              const analysis = await getFabioAnalysis(inst.pair as CandlePair);
+              if (
+                !analysis ||
+                analysis.signal === "NEUTRAL" ||
+                analysis.entryPrice == null ||
+                analysis.stopLoss == null ||
+                analysis.targetPrice == null
+              ) {
+                return;
+              }
+              await fanOutFabioSignalToBridges({
+                pair: inst.pair,
+                side: analysis.signal,
+                entry: analysis.entryPrice,
+                sl: analysis.stopLoss,
+                tp: analysis.targetPrice,
+                model: analysis.signalModel,
+              });
+            } catch (e) {
+              console.warn(`[fabio] fan-out failed for ${inst.pair}`, e);
+            }
+          })
+        );
+      }
+    } catch (err) {
+      console.warn("[fabio] fan-out top-level failed", err);
+    }
 
     if (prices.anyStale) {
       const allowed = await withCooldown("scanner:feed-stale", "watch");

@@ -3,7 +3,7 @@
 import { ReactNode, useState, useEffect, useCallback } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Activity, LineChart, LayoutDashboard, Settings as Cog, Wallet, TrendingUp, Sparkles, Briefcase } from "lucide-react";
+import { Activity, LineChart, LayoutDashboard, Settings as Cog, Wallet, TrendingUp, Sparkles, Briefcase, Layers } from "lucide-react";
 import { LiveStatusProvider, useLiveStatus } from "@/lib/live-status";
 import { AccountProvider, useAccount } from "@/lib/account-context";
 import HealthBadge from "@/components/HealthBadge";
@@ -124,6 +124,7 @@ function Shell({ children }: { children: ReactNode }) {
           <NavLink href="/" icon={<LayoutDashboard size={15} />} label="Live Signals" active={pathname === "/"} />
           <NavLink href="/strategies" icon={<Sparkles size={15} />} label="Strategy Lanes" active={pathname === "/strategies"} />
           <NavLink href="/live-trading" icon={<Briefcase size={15} />} label="Live Trading" active={pathname === "/live-trading"} />
+          <NavLink href="/fabio-live" icon={<Layers size={15} />} label="Fabio Live" active={pathname === "/fabio-live"} />
           <NavLink href="/performance" icon={<LineChart size={15} />} label="Performance" active={pathname === "/performance"} />
           <NavLink href="/fabio" icon={<Activity size={15} />} label="Fabio 40-Range" active={pathname === "/fabio"} />
         </nav>
@@ -190,6 +191,7 @@ function Shell({ children }: { children: ReactNode }) {
         <MobileNavLink href="/" icon={<LayoutDashboard size={17} />} label="Signals" active={pathname === "/"} />
         <MobileNavLink href="/strategies" icon={<Sparkles size={17} />} label="Lanes" active={pathname === "/strategies"} />
         <MobileNavLink href="/live-trading" icon={<Briefcase size={17} />} label="Live" active={pathname === "/live-trading"} />
+        <MobileNavLink href="/fabio-live" icon={<Layers size={17} />} label="F-Live" active={pathname === "/fabio-live"} />
         <MobileNavLink href="/fabio" icon={<Activity size={17} />} label="Fabio" active={pathname === "/fabio"} />
         <MobileNavLink href="/performance" icon={<LineChart size={17} />} label="Perf" active={pathname === "/performance"} />
       </nav>
