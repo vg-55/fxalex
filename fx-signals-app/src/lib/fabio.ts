@@ -75,9 +75,29 @@ export type FabioAnalysis = {
 const TICKS_PER_CANDLE = 40;
 const PROFILE_BINS_PER_TICK = 5; // bin = 5 × tickSize → stable POC/VA
 const VALUE_AREA_PCT = 0.7;
-const NY_OPEN_UTC_HOUR = 13; // 09:30 NY ≈ 13:30 UTC during DST (approximate)
+// NY cash open is 09:30 America/New_York. UTC offset depends on US DST:
+//   EDT (2nd Sun Mar → 1st Sun Nov): 09:30 ET = 13:30 UTC
+//   EST (rest of year):              09:30 ET = 14:30 UTC
 const NY_OPEN_UTC_MIN = 30;
 const IB_MINUTES = 30;
+
+// US DST: starts 2nd Sunday of March, ends 1st Sunday of November (both at
+// 02:00 local). We approximate at the day level — sufficient for IB which is
+// hours away from the boundary.
+function isUsDst(d: Date): boolean {
+  const y = d.getUTCFullYear();
+  // 2nd Sunday of March
+  const mar1 = new Date(Date.UTC(y, 2, 1));
+  const dstStart = new Date(Date.UTC(y, 2, 1 + ((7 - mar1.getUTCDay()) % 7) + 7));
+  // 1st Sunday of November
+  const nov1 = new Date(Date.UTC(y, 10, 1));
+  const dstEnd = new Date(Date.UTC(y, 10, 1 + ((7 - nov1.getUTCDay()) % 7)));
+  return d >= dstStart && d < dstEnd;
+}
+
+function nyOpenUtcHour(d: Date): number {
+  return isUsDst(d) ? 13 : 14;
+}
 
 function getTickSize(pair: string) {
   if (pair.includes("JPY")) return 0.01;
@@ -207,7 +227,7 @@ function computeInitialBalance(ticks: Tick[]): { high: number | null; low: numbe
   if (ticks.length === 0) return { high: null, low: null };
   const last = new Date(ticks[ticks.length - 1].time);
   const ibStart = new Date(
-    Date.UTC(last.getUTCFullYear(), last.getUTCMonth(), last.getUTCDate(), NY_OPEN_UTC_HOUR, NY_OPEN_UTC_MIN, 0)
+    Date.UTC(last.getUTCFullYear(), last.getUTCMonth(), last.getUTCDate(), nyOpenUtcHour(last), NY_OPEN_UTC_MIN, 0)
   );
   const ibEnd = new Date(ibStart.getTime() + IB_MINUTES * 60_000);
   let high: number | null = null;
@@ -350,39 +370,75 @@ export async function getFabioAnalysis(pair: CandlePair): Promise<FabioAnalysis 
     const within = nearest.dist <= binSize * 2;
     if (within) {
       if (currentPrice > vah && lastCandle.isUp && tickDelta > 0) {
-        signal = "BUY";
-        signalModel = "ABSORPTION_LONG";
-        reasoning = `Expansion long: price reclaiming LVN @ ${nearest.priceLevel.toFixed(5)} above VAH.`;
-        entryPrice = currentPrice;
-        targetPrice = currentPrice + (currentPrice - vah) * 1.5;
-        stopLoss = nearest.priceLevel - requiredRange;
+        const e = currentPrice;
+        const tp = e + (e - vah) * 1.5;
+        const sl = nearest.priceLevel - requiredRange;
+        const rr = sl < e ? (tp - e) / (e - sl) : 0;
+        if (rr >= 1.5) {
+          signal = "BUY";
+          signalModel = "ABSORPTION_LONG";
+          reasoning = `Expansion long: price reclaiming LVN @ ${nearest.priceLevel.toFixed(5)} above VAH.`;
+          entryPrice = e;
+          targetPrice = tp;
+          stopLoss = sl;
+        } else {
+          reasoning = `LVN reclaim long but RR ${rr.toFixed(2)} < 1.5 — skipping.`;
+        }
       } else if (currentPrice < val && !lastCandle.isUp && tickDelta < 0) {
-        signal = "SELL";
-        signalModel = "ABSORPTION_SHORT";
-        reasoning = `Expansion short: price rejecting LVN @ ${nearest.priceLevel.toFixed(5)} below VAL.`;
-        entryPrice = currentPrice;
-        targetPrice = currentPrice - (val - currentPrice) * 1.5;
-        stopLoss = nearest.priceLevel + requiredRange;
+        const e = currentPrice;
+        // Note: previous formula `(val - currentPrice) * 1.5` was wrong below VAL
+        // (currentPrice < val so val - currentPrice > 0, but TP needs (vah - e)
+        // style symmetry). Mirror the long: distance to VAL × 1.5.
+        const tp = e - (val - e) * 1.5;
+        const sl = nearest.priceLevel + requiredRange;
+        const rr = sl > e ? (e - tp) / (sl - e) : 0;
+        if (rr >= 1.5) {
+          signal = "SELL";
+          signalModel = "ABSORPTION_SHORT";
+          reasoning = `Expansion short: price rejecting LVN @ ${nearest.priceLevel.toFixed(5)} below VAL.`;
+          entryPrice = e;
+          targetPrice = tp;
+          stopLoss = sl;
+        } else {
+          reasoning = `LVN rejection short but RR ${rr.toFixed(2)} < 1.5 — skipping.`;
+        }
       }
     }
   }
 
   // Model 3: Initial Balance breakout
   if (signalModel === "NONE" && ib.high !== null && ib.low !== null) {
+    const ibRange = ib.high - ib.low;
     if (currentPrice > ib.high && lastCandle.isUp && tickDelta > 0) {
-      signal = "BUY";
-      signalModel = "IB_BREAKOUT_LONG";
-      reasoning = `IB breakout long: price cleared the NY Initial Balance high (${ib.high.toFixed(5)}).`;
-      entryPrice = currentPrice;
-      targetPrice = currentPrice + (ib.high - ib.low);
-      stopLoss = ib.high - requiredRange;
+      const e = currentPrice;
+      const tp = e + ibRange;
+      const sl = ib.high - requiredRange;
+      const rr = sl < e ? (tp - e) / (e - sl) : 0;
+      if (rr >= 1.5) {
+        signal = "BUY";
+        signalModel = "IB_BREAKOUT_LONG";
+        reasoning = `IB breakout long: price cleared the NY Initial Balance high (${ib.high.toFixed(5)}).`;
+        entryPrice = e;
+        targetPrice = tp;
+        stopLoss = sl;
+      } else {
+        reasoning = `IB long breakout but RR ${rr.toFixed(2)} < 1.5 — skipping.`;
+      }
     } else if (currentPrice < ib.low && !lastCandle.isUp && tickDelta < 0) {
-      signal = "SELL";
-      signalModel = "IB_BREAKOUT_SHORT";
-      reasoning = `IB breakout short: price broke the NY Initial Balance low (${ib.low.toFixed(5)}).`;
-      entryPrice = currentPrice;
-      targetPrice = currentPrice - (ib.high - ib.low);
-      stopLoss = ib.low + requiredRange;
+      const e = currentPrice;
+      const tp = e - ibRange;
+      const sl = ib.low + requiredRange;
+      const rr = sl > e ? (e - tp) / (sl - e) : 0;
+      if (rr >= 1.5) {
+        signal = "SELL";
+        signalModel = "IB_BREAKOUT_SHORT";
+        reasoning = `IB breakout short: price broke the NY Initial Balance low (${ib.low.toFixed(5)}).`;
+        entryPrice = e;
+        targetPrice = tp;
+        stopLoss = sl;
+      } else {
+        reasoning = `IB short breakout but RR ${rr.toFixed(2)} < 1.5 — skipping.`;
+      }
     }
   }
 
@@ -430,7 +486,18 @@ MECHANICAL REASONING: ${reasoning}`;
         aiInterpretation = aiRes.replace(/\[SCORE:\s*\d+\/100\]/i, "").trim();
         if (aiInterpretation && aiConfidenceScore !== undefined) {
           aiCache.set(stateKey, { interpretation: aiInterpretation, score: aiConfidenceScore });
-          if (aiCache.size > 1000) aiCache.clear();
+          // Bounded LRU-ish: when over cap, drop the oldest 20% (insertion order).
+          // Avoids the full-clear → GLM thundering-herd pattern.
+          const MAX_CACHE = 1000;
+          if (aiCache.size > MAX_CACHE) {
+            const drop = Math.floor(MAX_CACHE * 0.2);
+            const it = aiCache.keys();
+            for (let i = 0; i < drop; i++) {
+              const k = it.next().value;
+              if (k === undefined) break;
+              aiCache.delete(k);
+            }
+          }
         }
       }
     }

@@ -492,11 +492,21 @@ export async function runScanOnce(): Promise<ScanSummary> {
         });
 
         // Fan-out to self-hosted bridge bots (cBot / MT5 EA) on the
-        // rising edge into ACTIVE. Best-effort: never blocks the scan.
+        // rising edge into ACTIVE. Best-effort: never blocks the scan, but we
+        // surface zero-fanout / errors loudly so a silent "UI shows ACTIVE,
+        // MT5 receives nothing" failure mode is visible.
         if (s.status === "ACTIVE" && before?.status !== "ACTIVE") {
-          fanOutSignalToBridges(s).catch((err) =>
-            console.warn("[bridge] fan-out failed", err)
-          );
+          fanOutSignalToBridges(s)
+            .then((n) => {
+              if (typeof n === "number" && n === 0) {
+                console.warn(
+                  `[bridge] ${s.pair} went ACTIVE but fan-out queued 0 orders — check live accounts / minRR / inflight caps`
+                );
+              }
+            })
+            .catch((err) =>
+              console.error(`[bridge] fan-out threw for ${s.pair}:`, err)
+            );
         }
 
         const sev = severityFor(s, before);
