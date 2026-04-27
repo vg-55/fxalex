@@ -23,6 +23,7 @@ type PerformanceData = {
     entry: number;
     sl: number;
     tp: number;
+    lotSize?: number;
     enteredAt: string;
     closedAt: string;
     holdMinutes: number;
@@ -178,6 +179,7 @@ export default function PerformancePage() {
                     <th className="py-2">Dir</th>
                     <th className="py-2">Result</th>
                     <th className="py-2 text-right">R</th>
+                    <th className="py-2 text-right">Lots</th>
                     <th className="py-2 text-right">Hold</th>
                     <th className="py-2 text-right">Closed</th>
                   </tr>
@@ -215,6 +217,9 @@ export default function PerformancePage() {
                       >
                         {o.rPnl >= 0 ? "+" : ""}
                         {o.rPnl.toFixed(1)}
+                      </td>
+                      <td className="py-2 text-right font-mono text-slate-300">
+                        {o.lotSize ? o.lotSize.toFixed(2) : "—"}
                       </td>
                       <td className="py-2 text-right font-mono text-slate-400">
                         {formatHold(o.holdMinutes)}

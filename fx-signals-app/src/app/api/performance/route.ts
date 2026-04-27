@@ -89,6 +89,7 @@ export async function GET() {
           entry: o.entry,
           sl: o.sl,
           tp: o.tp,
+          lotSize: o.lotSize,
           enteredAt: o.enteredAt.toISOString(),
           closedAt: o.closedAt.toISOString(),
           holdMinutes: o.holdMinutes,
