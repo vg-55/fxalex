@@ -218,6 +218,7 @@ export const signalOutcomes = pgTable(
     tp: doublePrecision("tp").notNull(),
     result: text("result").notNull(),
     rPnl: doublePrecision("r_pnl").notNull(),
+    lotSize: doublePrecision("lot_size"),
     enteredAt: timestamp("entered_at", { withTimezone: true }).notNull(),
     closedAt: timestamp("closed_at", { withTimezone: true }).notNull().defaultNow(),
     holdMinutes: integer("hold_minutes").notNull(),
