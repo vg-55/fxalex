@@ -105,6 +105,37 @@ type CtraderAccount = {
   createdAt: string;
 };
 
+type BridgeAccount = {
+  id: string;
+  label: string;
+  provider: "ctrader" | "mt5";
+  accountLogin: string | null;
+  brokerName: string | null;
+  currency: string | null;
+  mode: Mode;
+  strategies: Strategy[];
+  symbols: string[] | null;
+  symbolOverrides: Record<string, string> | null;
+  riskPctPerTrade: number;
+  maxConcurrent: number;
+  maxDailyLossPct: number;
+  maxLot: number;
+  minRR: number;
+  balance: number | null;
+  equity: number | null;
+  marginLevel: number | null;
+  openPositions: number | null;
+  botVersion: string | null;
+  lastPolledAt: string | null;
+  lastHeartbeatAt: string | null;
+  lastError: string | null;
+  enabled: boolean;
+  isStale: boolean;
+  isPolling: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
 const STRATEGY_META: Record<Strategy, { label: string; icon: React.ReactNode; tone: string }> = {
   ALEX: { label: "Alex G", icon: <Target size={14} />, tone: "blue" },
   FABIO: { label: "Fabio", icon: <Layers size={14} />, tone: "purple" },
@@ -120,6 +151,9 @@ export default function LiveTradingPage() {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [ctraderAccounts, setCtraderAccounts] = useState<CtraderAccount[]>([]);
   const [ctraderConfigured, setCtraderConfigured] = useState(true);
+  const [bridgeAccounts, setBridgeAccounts] = useState<BridgeAccount[]>([]);
+  const [showAddBridge, setShowAddBridge] = useState(false);
+  const [mintedToken, setMintedToken] = useState<{ token: string; account: BridgeAccount } | null>(null);
   const [configured, setConfigured] = useState<{ crypto: boolean; metaapi: boolean }>({
     crypto: true,
     metaapi: true,
@@ -172,15 +206,28 @@ export default function LiveTradingPage() {
     }
   }, []);
 
+  const loadBridge = useCallback(async () => {
+    try {
+      const res = await fetch("/api/bridge/accounts", { cache: "no-store" });
+      if (!res.ok) return;
+      const json = (await res.json()) as { accounts: BridgeAccount[] };
+      setBridgeAccounts(json.accounts);
+    } catch {
+      // Non-fatal.
+    }
+  }, []);
+
   useEffect(() => {
     load();
     loadCtrader();
+    loadBridge();
     const id = setInterval(() => {
       load();
       loadCtrader();
+      loadBridge();
     }, 30_000);
     return () => clearInterval(id);
-  }, [load, loadCtrader]);
+  }, [load, loadCtrader, loadBridge]);
 
   const selected = accounts.find((a) => a.id === selectedId) ?? null;
   const liveCount = accounts.filter((a) => a.mode === "LIVE").length;
@@ -223,6 +270,14 @@ export default function LiveTradingPage() {
             >
               <Plus size={13} />
               Add MT5
+            </button>
+            <button
+              onClick={() => setShowAddBridge(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500/15 text-amber-300 border border-amber-500/30 hover:bg-amber-500/25 text-xs font-semibold"
+              title="Self-hosted bot bridge (cBot or MT5 EA on your VPS)"
+            >
+              <Plus size={13} />
+              Add Bridge
             </button>
           </div>
         </div>
@@ -269,6 +324,8 @@ export default function LiveTradingPage() {
         </div>
       )}
 
+      <CtraderToast />
+
       {/* Body */}
       <div className="flex-1 grid grid-cols-1 lg:grid-cols-[320px,1fr] gap-4 p-4 sm:p-6 min-h-0">
         {/* Account list */}
@@ -294,6 +351,11 @@ export default function LiveTradingPage() {
           )}
 
           <CtraderPanel accounts={ctraderAccounts} onChange={loadCtrader} />
+          <BridgePanel
+            accounts={bridgeAccounts}
+            onChange={loadBridge}
+            onAdd={() => setShowAddBridge(true)}
+          />
         </div>
 
         {/* Detail panel */}
@@ -318,6 +380,23 @@ export default function LiveTradingPage() {
             setSelectedId(a.id);
             load();
           }}
+        />
+      )}
+      {showAddBridge && (
+        <AddBridgeModal
+          onClose={() => setShowAddBridge(false)}
+          onCreated={(account, token) => {
+            setShowAddBridge(false);
+            setMintedToken({ account, token });
+            loadBridge();
+          }}
+        />
+      )}
+      {mintedToken && (
+        <BridgeTokenModal
+          account={mintedToken.account}
+          token={mintedToken.token}
+          onClose={() => setMintedToken(null)}
         />
       )}
     </div>
@@ -1361,6 +1440,7 @@ function CtraderListItem({
   onChange: () => void;
 }) {
   const [busy, setBusy] = useState(false);
+  const [syncResult, setSyncResult] = useState<string | null>(null);
   const expired = new Date(account.tokenExpiresAt).getTime() < Date.now();
 
   async function disconnect() {
@@ -1369,6 +1449,33 @@ function CtraderListItem({
     try {
       await fetch(`/api/ctrader/accounts/${account.id}`, { method: "DELETE" });
       onChange();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function sync() {
+    setBusy(true);
+    setSyncResult(null);
+    try {
+      const res = await fetch(`/api/ctrader/accounts/${account.id}/sync`, { method: "POST" });
+      const j = (await res.json()) as {
+        ok?: boolean;
+        tokenRotated?: boolean;
+        tradingAccountsVisible?: number;
+        stillAuthorised?: boolean;
+        error?: string;
+      };
+      if (!res.ok || !j.ok) {
+        setSyncResult(`✗ ${j.error ?? "sync failed"}`);
+      } else {
+        setSyncResult(
+          `✓ Spotware OK · ${j.tradingAccountsVisible} acct${j.tradingAccountsVisible === 1 ? "" : "s"} visible${j.tokenRotated ? " · token refreshed" : ""}`
+        );
+      }
+      onChange();
+    } catch (e) {
+      setSyncResult(`✗ ${e instanceof Error ? e.message : "network error"}`);
     } finally {
       setBusy(false);
     }
@@ -1391,15 +1498,485 @@ function CtraderListItem({
           {account.lastError && (
             <div className="text-[10px] text-rose-400 mt-1 line-clamp-2">{account.lastError}</div>
           )}
+          {syncResult && (
+            <div
+              className={`text-[10px] mt-1 ${syncResult.startsWith("✓") ? "text-emerald-400" : "text-rose-400"}`}
+            >
+              {syncResult}
+            </div>
+          )}
+        </div>
+        <div className="flex flex-col gap-1 shrink-0">
+          <button
+            onClick={sync}
+            disabled={busy}
+            className="text-[10px] px-2 py-1 rounded-md bg-emerald-500/10 text-emerald-300 border border-emerald-500/20 hover:bg-emerald-500/20 disabled:opacity-50"
+            title="Verify OAuth tokens against Spotware"
+          >
+            <RefreshCw size={11} className={busy ? "animate-spin" : ""} />
+          </button>
+          <button
+            onClick={disconnect}
+            disabled={busy}
+            className="text-[10px] px-2 py-1 rounded-md bg-rose-500/10 text-rose-300 border border-rose-500/20 hover:bg-rose-500/20 disabled:opacity-50"
+            title="Remove this connection"
+          >
+            <Trash2 size={11} />
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Reads ?connected=ctrader / ?ctrader_error=... after the OAuth callback and
+// shows a transient banner. Strips the params from the URL after rendering so
+// the banner doesn't reappear on refresh.
+function CtraderToast() {
+  const [msg, setMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const sp = new URLSearchParams(window.location.search);
+    const ok = sp.get("connected");
+    const err = sp.get("ctrader_error");
+    if (ok === "ctrader") {
+      setMsg({ kind: "ok", text: "cTrader account connected." });
+    } else if (err) {
+      setMsg({ kind: "err", text: `cTrader: ${err}` });
+    } else {
+      return;
+    }
+    sp.delete("connected");
+    sp.delete("ctrader_error");
+    const qs = sp.toString();
+    window.history.replaceState({}, "", window.location.pathname + (qs ? `?${qs}` : ""));
+    const t = setTimeout(() => setMsg(null), 8000);
+    return () => clearTimeout(t);
+  }, []);
+
+  if (!msg) return null;
+  const tone =
+    msg.kind === "ok"
+      ? "bg-emerald-500/8 border-emerald-500/30 text-emerald-300"
+      : "bg-rose-500/8 border-rose-500/30 text-rose-300";
+  return (
+    <div className={`mx-4 sm:mx-6 mt-4 rounded-xl border p-3 flex items-center gap-3 ${tone}`}>
+      {msg.kind === "ok" ? (
+        <CheckCircle2 size={15} className="shrink-0" />
+      ) : (
+        <AlertCircle size={15} className="shrink-0" />
+      )}
+      <p className="text-xs flex-1">{msg.text}</p>
+      <button
+        onClick={() => setMsg(null)}
+        className="text-xs px-2 py-0.5 rounded-md hover:bg-white/5"
+      >
+        <X size={12} />
+      </button>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Bridge (self-hosted cBot / MT5 EA) panel
+// ---------------------------------------------------------------------------
+function BridgePanel({
+  accounts,
+  onChange,
+  onAdd,
+}: {
+  accounts: BridgeAccount[];
+  onChange: () => void;
+  onAdd: () => void;
+}) {
+  if (accounts.length === 0) {
+    return (
+      <div className="mt-4 rounded-xl border border-dashed border-amber-500/20 bg-amber-500/[0.02] p-3">
+        <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-wider text-amber-300/80 mb-1.5">
+          <Activity size={12} /> Bridge bots
+        </div>
+        <div className="text-[11px] text-slate-400 leading-relaxed mb-2">
+          Self-hosted cBot or MT5 EA running on your own VPS. Polls this app
+          over HTTPS — no broker billing, no Trial gate.
         </div>
         <button
-          onClick={disconnect}
-          disabled={busy}
-          className="text-[10px] px-2 py-1 rounded-md bg-rose-500/10 text-rose-300 border border-rose-500/20 hover:bg-rose-500/20 disabled:opacity-50 shrink-0"
-          title="Remove this connection"
+          onClick={onAdd}
+          className="text-[10px] px-2 py-1 rounded-md bg-amber-500/15 text-amber-300 border border-amber-500/25 hover:bg-amber-500/25 inline-flex items-center gap-1"
         >
-          <Trash2 size={11} />
+          <Plus size={10} /> Mint a bridge token
         </button>
+      </div>
+    );
+  }
+  return (
+    <div className="mt-4 space-y-2">
+      <div className="flex items-center gap-2 px-1">
+        <Activity size={12} className="text-amber-400" />
+        <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
+          Bridge bots · {accounts.length}
+        </span>
+      </div>
+      {accounts.map((a) => (
+        <BridgeListItem key={a.id} account={a} onChange={onChange} />
+      ))}
+    </div>
+  );
+}
+
+function BridgeListItem({
+  account,
+  onChange,
+}: {
+  account: BridgeAccount;
+  onChange: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [openMode, setOpenMode] = useState(false);
+
+  async function setMode(mode: Mode) {
+    setBusy(true);
+    try {
+      await fetch(`/api/bridge/accounts/${account.id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ mode }),
+      });
+      onChange();
+    } finally {
+      setBusy(false);
+      setOpenMode(false);
+    }
+  }
+
+  async function remove() {
+    if (!confirm(`Delete bridge "${account.label}"? Pending orders will be cancelled.`)) return;
+    setBusy(true);
+    try {
+      await fetch(`/api/bridge/accounts/${account.id}`, { method: "DELETE" });
+      onChange();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const dot =
+    account.isStale
+      ? "bg-rose-500"
+      : account.isPolling
+        ? "bg-emerald-400"
+        : "bg-amber-400";
+  const modeTone =
+    account.mode === "LIVE"
+      ? "bg-rose-500/20 text-rose-300 border-rose-500/30"
+      : account.mode === "SHADOW"
+        ? "bg-blue-500/15 text-blue-300 border-blue-500/30"
+        : "bg-slate-500/15 text-slate-400 border-slate-500/30";
+  const providerTone =
+    account.provider === "ctrader"
+      ? "bg-emerald-500/15 text-emerald-300"
+      : "bg-blue-500/15 text-blue-300";
+
+  return (
+    <div className="rounded-xl border border-amber-500/15 bg-amber-500/[0.03] p-3">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-1.5">
+            <span className={`w-1.5 h-1.5 rounded-full ${dot}`} />
+            <div className="text-xs font-semibold text-white truncate">{account.label}</div>
+            <span className={`text-[9px] px-1.5 py-0.5 rounded ${providerTone} font-mono uppercase`}>
+              {account.provider}
+            </span>
+          </div>
+          <div className="text-[10px] text-slate-500 font-mono truncate mt-0.5">
+            {account.brokerName ?? "—"}
+            {account.accountLogin ? ` · #${account.accountLogin}` : ""}
+            {account.botVersion ? ` · v${account.botVersion}` : ""}
+          </div>
+          {account.balance != null && (
+            <div className="text-[10px] text-slate-400 mt-0.5">
+              {account.balance.toFixed(2)} {account.currency ?? ""}
+              {account.equity != null && account.equity !== account.balance && (
+                <span className="text-slate-500"> · eq {account.equity.toFixed(2)}</span>
+              )}
+              {account.openPositions != null && account.openPositions > 0 && (
+                <span className="text-amber-300"> · {account.openPositions} open</span>
+              )}
+            </div>
+          )}
+          {account.isStale && (
+            <div className="text-[10px] text-rose-400 mt-1">
+              No heartbeat &gt;5min — fan-out paused
+            </div>
+          )}
+          {account.lastError && (
+            <div className="text-[10px] text-rose-400 mt-1 line-clamp-2">{account.lastError}</div>
+          )}
+        </div>
+        <div className="flex flex-col gap-1 shrink-0 items-end">
+          <button
+            onClick={() => setOpenMode((v) => !v)}
+            disabled={busy}
+            className={`text-[9px] px-2 py-1 rounded-md border font-semibold ${modeTone} hover:brightness-125 disabled:opacity-50`}
+            title="Change trading mode"
+          >
+            {account.mode}
+          </button>
+          {openMode && (
+            <div className="flex flex-col gap-1">
+              {(["OFF", "SHADOW", "LIVE"] as Mode[])
+                .filter((m) => m !== account.mode)
+                .map((m) => (
+                  <button
+                    key={m}
+                    onClick={() => setMode(m)}
+                    className="text-[9px] px-2 py-0.5 rounded-md bg-white/[0.04] text-slate-300 border border-white/10 hover:bg-white/[0.08]"
+                  >
+                    → {m}
+                  </button>
+                ))}
+            </div>
+          )}
+          <button
+            onClick={remove}
+            disabled={busy}
+            className="text-[10px] px-2 py-1 rounded-md bg-rose-500/10 text-rose-300 border border-rose-500/20 hover:bg-rose-500/20 disabled:opacity-50"
+            title="Delete bridge"
+          >
+            <Trash2 size={11} />
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AddBridgeModal({
+  onClose,
+  onCreated,
+}: {
+  onClose: () => void;
+  onCreated: (a: BridgeAccount, token: string) => void;
+}) {
+  const [label, setLabel] = useState("");
+  const [provider, setProvider] = useState<"ctrader" | "mt5">("mt5");
+  const [accountLogin, setAccountLogin] = useState("");
+  const [brokerName, setBrokerName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/bridge/accounts", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          label: label.trim(),
+          provider,
+          accountLogin: accountLogin.trim() || null,
+          brokerName: brokerName.trim() || null,
+        }),
+      });
+      const j = (await res.json()) as { account?: BridgeAccount; token?: string; error?: string };
+      if (!res.ok || !j.account || !j.token) throw new Error(j.error ?? `HTTP ${res.status}`);
+      onCreated(j.account, j.token);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "create failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+      <form
+        onSubmit={submit}
+        className="bg-[#0c1322] border border-white/10 rounded-2xl p-5 w-full max-w-md shadow-2xl"
+      >
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-sm font-bold text-white">Add bridge bot</h2>
+          <button
+            type="button"
+            onClick={onClose}
+            className="text-slate-500 hover:text-slate-300"
+          >
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="space-y-3">
+          <label className="block">
+            <span className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">
+              Label
+            </span>
+            <input
+              type="text"
+              value={label}
+              onChange={(e) => setLabel(e.target.value)}
+              required
+              maxLength={64}
+              placeholder="e.g. IC Markets MT5 (VPS)"
+              className="mt-1 w-full bg-white/[0.03] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
+            />
+          </label>
+
+          <label className="block">
+            <span className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">
+              Provider
+            </span>
+            <select
+              value={provider}
+              onChange={(e) => setProvider(e.target.value as "ctrader" | "mt5")}
+              className="mt-1 w-full bg-white/[0.03] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
+            >
+              <option value="mt5">MT5 — Expert Advisor</option>
+              <option value="ctrader">cTrader — cBot</option>
+            </select>
+          </label>
+
+          <label className="block">
+            <span className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">
+              Broker (optional)
+            </span>
+            <input
+              type="text"
+              value={brokerName}
+              onChange={(e) => setBrokerName(e.target.value)}
+              maxLength={64}
+              placeholder="IC Markets"
+              className="mt-1 w-full bg-white/[0.03] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
+            />
+          </label>
+
+          <label className="block">
+            <span className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">
+              Account # (optional)
+            </span>
+            <input
+              type="text"
+              value={accountLogin}
+              onChange={(e) => setAccountLogin(e.target.value)}
+              maxLength={32}
+              placeholder="123456"
+              className="mt-1 w-full bg-white/[0.03] border border-white/10 rounded-lg px-3 py-2 text-sm text-white"
+            />
+          </label>
+
+          <div className="text-[11px] text-slate-400 bg-white/[0.02] rounded-lg p-2.5 leading-relaxed">
+            On submit a unique <span className="font-mono text-amber-300">bearer token</span> is
+            minted. Paste it into the bot&apos;s config — it&apos;s shown only once. Default mode
+            is <span className="font-mono text-slate-300">OFF</span>; flip to{" "}
+            <span className="font-mono text-rose-300">LIVE</span> when ready.
+          </div>
+
+          {error && (
+            <div className="text-[11px] text-rose-300 bg-rose-500/10 border border-rose-500/20 rounded-lg p-2">
+              {error}
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center justify-end gap-2 mt-5">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={busy}
+            className="px-3 py-1.5 rounded-lg text-xs text-slate-400 hover:bg-white/5"
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            disabled={busy || !label.trim()}
+            className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-amber-500/20 text-amber-200 border border-amber-500/30 hover:bg-amber-500/30 disabled:opacity-50"
+          >
+            {busy ? "Minting…" : "Mint token"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function BridgeTokenModal({
+  account,
+  token,
+  onClose,
+}: {
+  account: BridgeAccount;
+  token: string;
+  onClose: () => void;
+}) {
+  const [reveal, setReveal] = useState(true);
+  const [copied, setCopied] = useState(false);
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(token);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Clipboard API unavailable (insecure context).
+    }
+  }
+  return (
+    <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+      <div className="bg-[#0c1322] border border-amber-500/30 rounded-2xl p-5 w-full max-w-lg shadow-2xl">
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-sm font-bold text-white flex items-center gap-2">
+            <ShieldCheck size={15} className="text-amber-300" />
+            Save this token now
+          </h2>
+          <button onClick={onClose} className="text-slate-500 hover:text-slate-300">
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="text-[12px] text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-lg p-2.5 mb-3 leading-relaxed">
+          This bearer token is shown <strong>only once</strong>. We store only a SHA-256
+          hash. If you lose it, rotate via the API; no recovery possible.
+        </div>
+
+        <div className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold mb-1">
+          Bridge: {account.label} ({account.provider})
+        </div>
+
+        <div className="flex items-stretch gap-2">
+          <code className="flex-1 bg-black/40 border border-white/10 rounded-lg px-3 py-2 font-mono text-[11px] text-amber-200 break-all">
+            {reveal ? token : "•".repeat(Math.min(token.length, 48))}
+          </code>
+          <button
+            onClick={() => setReveal((v) => !v)}
+            title={reveal ? "Hide" : "Show"}
+            className="px-2 rounded-lg bg-white/[0.03] border border-white/10 text-slate-400 hover:text-white"
+          >
+            {reveal ? <EyeOff size={14} /> : <Eye size={14} />}
+          </button>
+          <button
+            onClick={copy}
+            className="px-3 rounded-lg bg-amber-500/20 text-amber-200 border border-amber-500/30 hover:bg-amber-500/30 text-xs font-semibold"
+          >
+            {copied ? "Copied" : "Copy"}
+          </button>
+        </div>
+
+        <div className="text-[11px] text-slate-400 mt-3 leading-relaxed">
+          Paste this into your bot&apos;s configuration alongside the API base URL
+          (typically your Vercel deployment). The bot will then call{" "}
+          <code className="text-slate-300">/api/bridge/poll</code> every 10s.
+        </div>
+
+        <div className="flex justify-end mt-4">
+          <button
+            onClick={onClose}
+            className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-amber-500/20 text-amber-200 border border-amber-500/30 hover:bg-amber-500/30 inline-flex items-center gap-1"
+          >
+            <Save size={12} />
+            I saved it
+          </button>
+        </div>
       </div>
     </div>
   );

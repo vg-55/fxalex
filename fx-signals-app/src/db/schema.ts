@@ -359,6 +359,95 @@ export const ctraderAccounts = pgTable("ctrader_accounts", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
+// ---------------------------------------------------------------------------
+// bridge_accounts — self-hosted bots (cTrader cBot or MT5 EA on a Windows VPS)
+// authenticate to us with a Bearer token. Polymorphic via the `provider`
+// column so both cTrader Desktop's cBot and MT5's EA share one wire protocol.
+// We never store the broker password here — the bot lives inside an already-
+// signed-in cTrader Desktop / MT5 instance and trades through the platform's
+// internal API. This bypasses Spotware Open API approval AND MetaApi billing.
+// ---------------------------------------------------------------------------
+export const bridgeAccounts = pgTable(
+  "bridge_accounts",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    label: text("label").notNull(),
+    provider: text("provider").notNull(), // 'ctrader' | 'mt5'
+    // sha256 of the bearer token shown to the user once at creation. One-way:
+    // we never need to display or reverse it. Compared via timingSafeEqual.
+    bearerTokenHash: text("bearer_token_hash").notNull().unique(),
+    accountLogin: text("account_login"),
+    brokerName: text("broker_name"),
+    currency: text("currency"),
+    // Operating mode + filters (mirror mt5_accounts shape).
+    mode: text("mode").notNull().default("OFF"), // OFF | SHADOW | LIVE
+    strategies: jsonb("strategies").notNull().default(sql`'["COMBINED"]'::jsonb`),
+    symbols: jsonb("symbols"),
+    // Per-account symbol remap (e.g. {"XAUUSD": "GOLD"} for IC RAW MT5).
+    symbolOverrides: jsonb("symbol_overrides"),
+    riskPctPerTrade: doublePrecision("risk_pct_per_trade").notNull().default(0.5),
+    maxConcurrent: integer("max_concurrent").notNull().default(3),
+    maxDailyLossPct: doublePrecision("max_daily_loss_pct").notNull().default(3),
+    maxLot: doublePrecision("max_lot").notNull().default(1),
+    minRR: doublePrecision("min_rr").notNull().default(1.5),
+    // Heartbeat-fed snapshot.
+    balance: doublePrecision("balance"),
+    equity: doublePrecision("equity"),
+    marginLevel: doublePrecision("margin_level"),
+    openPositions: integer("open_positions"),
+    botVersion: text("bot_version"),
+    lastPolledAt: timestamp("last_polled_at", { withTimezone: true }),
+    lastHeartbeatAt: timestamp("last_heartbeat_at", { withTimezone: true }),
+    lastError: text("last_error"),
+    enabled: boolean("enabled").notNull().default(true),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    tokenHashIdx: index("bridge_accounts_token_hash_idx").on(t.bearerTokenHash),
+  })
+);
+
+// ---------------------------------------------------------------------------
+// bridge_orders — append-only ledger of orders queued for self-hosted bots.
+// State machine: QUEUED → SENT (claimed atomically by /poll) → FILLED |
+// REJECTED. CLOSED later when the position closes (heartbeat or ack).
+// ---------------------------------------------------------------------------
+export const bridgeOrders = pgTable(
+  "bridge_orders",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => bridgeAccounts.id, { onDelete: "cascade" }),
+    signalId: uuid("signal_id"), // not FK — signals.id may be uuid or external
+    signalSource: text("signal_source"), // ALEX | FABIO | COMBINED (provenance)
+    status: text("status").notNull().default("QUEUED"),
+    // QUEUED | SENT | FILLED | REJECTED | CLOSED | CANCELLED
+    symbol: text("symbol").notNull(),
+    side: text("side").notNull(), // BUY | SELL
+    requestedLot: doublePrecision("requested_lot").notNull(),
+    entry: doublePrecision("entry").notNull(),
+    sl: doublePrecision("sl").notNull(),
+    tp: doublePrecision("tp").notNull(),
+    filledLot: doublePrecision("filled_lot"),
+    fillPrice: doublePrecision("fill_price"),
+    pnl: doublePrecision("pnl"),
+    rejectionReason: text("rejection_reason"),
+    brokerPositionId: text("broker_position_id"),
+    brokerOrderId: text("broker_order_id"),
+    sentAt: timestamp("sent_at", { withTimezone: true }),
+    filledAt: timestamp("filled_at", { withTimezone: true }),
+    closedAt: timestamp("closed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    accountStatusIdx: index("bridge_orders_account_status_idx").on(t.accountId, t.status),
+    createdAtIdx: index("bridge_orders_created_at_idx").on(t.createdAt),
+  })
+);
+
 export type Instrument = typeof instruments.$inferSelect;
 export type SignalRow = typeof signals.$inferSelect;
 export type NotificationRow = typeof notifications.$inferSelect;
@@ -369,3 +458,5 @@ export type Mt5AccountRow = typeof mt5Accounts.$inferSelect;
 export type Mt5OrderRow = typeof mt5Orders.$inferSelect;
 export type Mt5AuditRow = typeof mt5Audit.$inferSelect;
 export type CtraderAccountRow = typeof ctraderAccounts.$inferSelect;
+export type BridgeAccountRow = typeof bridgeAccounts.$inferSelect;
+export type BridgeOrderRow = typeof bridgeOrders.$inferSelect;

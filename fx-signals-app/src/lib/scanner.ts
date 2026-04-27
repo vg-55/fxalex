@@ -10,6 +10,7 @@ import { computeAoi, pickAoiForBias, shouldReplaceAoi } from "./aoi";
 import { refreshNewsIfStale, nextRelevantEvent } from "./news";
 import { evaluateOutcomes } from "./outcomes";
 import { pushExternal } from "./notifier";
+import { fanOutSignalToBridges } from "./bridge/fanout";
 
 export type ScanSummary = {
   ok: boolean;
@@ -488,6 +489,14 @@ export async function runScanOnce(): Promise<ScanSummary> {
           toConfidence: s.aiConfidence,
           snapshot: { ...s, aiInterpretation },
         });
+
+        // Fan-out to self-hosted bridge bots (cBot / MT5 EA) on the
+        // rising edge into ACTIVE. Best-effort: never blocks the scan.
+        if (s.status === "ACTIVE" && before?.status !== "ACTIVE") {
+          fanOutSignalToBridges(s).catch((err) =>
+            console.warn("[bridge] fan-out failed", err)
+          );
+        }
 
         const sev = severityFor(s, before);
         if (sev) {
