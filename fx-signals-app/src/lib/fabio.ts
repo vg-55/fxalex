@@ -283,38 +283,60 @@ export async function getFabioAnalysis(pair: CandlePair): Promise<FabioAnalysis 
   let stopLoss: number | undefined;
 
   // Model 1: Triple-A (Value Area Reversion / 80% rule)
-  // For LONG we need price near VAL *and below POC* so the rotation target
-  // (VAH) is on the correct side of entry; symmetric for SHORT. Without the
-  // POC-side guard we'd emit BUYs with TP < entry whenever price drifted
-  // above POC but remained inside the VA — the bug that produced the
-  // EURUSD/USDJPY no-fill signals on /fabio-live.
+  // We only want to trigger when price is *actually at the VA extreme* — i.e.
+  // in the bottom 30% of the VA for a long, top 30% for a short. Anywhere
+  // else inside the VA the reward-to-VAH (or VAL) is too small relative to
+  // the protective stop and the fan-out's minRR=1.5 floor will reject it.
   if (marketState === "BALANCE" && isInsideValueArea) {
+    const vaWidth = vah - val;
+    const stopBuffer = Math.max(requiredRange, vaWidth * 0.15);
+    const longZoneTop = val + vaWidth * 0.3;
+    const shortZoneBottom = vah - vaWidth * 0.3;
+
     if (
+      vaWidth > 0 &&
+      currentPrice <= longZoneTop &&
       currentPrice < poc &&
-      currentPrice < val + requiredRange * 2 &&
       lastCandle.isUp &&
       tickDelta > 0
     ) {
-      signal = "BUY";
-      signalModel = "TRIPLE_A_LONG";
-      reasoning =
-        "Triple-A long: price bounced off VAL with positive tick-delta. 80% rule targets the opposite VA extreme (VAH).";
-      entryPrice = currentPrice;
-      targetPrice = vah;
-      stopLoss = val - requiredRange;
+      const e = currentPrice;
+      const tp = vah;
+      const sl = val - stopBuffer;
+      const rr = (tp - e) / (e - sl);
+      if (rr >= 1.5) {
+        signal = "BUY";
+        signalModel = "TRIPLE_A_LONG";
+        reasoning =
+          "Triple-A long: price at VAL with positive tick-delta. 80% rule targets the opposite VA extreme (VAH).";
+        entryPrice = e;
+        targetPrice = tp;
+        stopLoss = sl;
+      } else {
+        reasoning = `VAL bounce setup but RR ${rr.toFixed(2)} < 1.5 — entry too far from VAL.`;
+      }
     } else if (
+      vaWidth > 0 &&
+      currentPrice >= shortZoneBottom &&
       currentPrice > poc &&
-      currentPrice > vah - requiredRange * 2 &&
       !lastCandle.isUp &&
       tickDelta < 0
     ) {
-      signal = "SELL";
-      signalModel = "TRIPLE_A_SHORT";
-      reasoning =
-        "Triple-A short: price rejected at VAH with negative tick-delta. 80% rule targets the opposite VA extreme (VAL).";
-      entryPrice = currentPrice;
-      targetPrice = val;
-      stopLoss = vah + requiredRange;
+      const e = currentPrice;
+      const tp = val;
+      const sl = vah + stopBuffer;
+      const rr = (e - tp) / (sl - e);
+      if (rr >= 1.5) {
+        signal = "SELL";
+        signalModel = "TRIPLE_A_SHORT";
+        reasoning =
+          "Triple-A short: price at VAH with negative tick-delta. 80% rule targets the opposite VA extreme (VAL).";
+        entryPrice = e;
+        targetPrice = tp;
+        stopLoss = sl;
+      } else {
+        reasoning = `VAH rejection setup but RR ${rr.toFixed(2)} < 1.5 — entry too far from VAH.`;
+      }
     } else {
       reasoning = "Inside Value Area but not at the extremes. Wait for a VAL bounce or VAH rejection.";
     }
