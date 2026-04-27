@@ -362,46 +362,50 @@ export async function getFabioAnalysis(pair: CandlePair): Promise<FabioAnalysis 
     }
   }
 
-  // Model 2: Absorption / LVN reclaim (expansion phase)
+  // Model 2: Absorption / VA-break retest (expansion phase)
+  // Strategy doc framing: "price explodes out of a range … wait for a pull-
+  // back that fails to follow through, then continuation". Practical, fan-
+  // outable version: enter on the breakout candle while still close to the
+  // broken VA edge, stop just back inside the VA, target one full VA width
+  // beyond the break ("break-of-range projection").
+  // The previous implementation used the nearest LVN as the stop anchor,
+  // which produced absurdly wide stops (LVN deep inside VA) and a TP
+  // proportional to the small breakout distance — RR almost never cleared
+  // 1.5, so the model was effectively dead.
   if (signalModel === "NONE" && marketState === "EXPANSION" && lvns.length > 0) {
-    const nearest = lvns
+    const vaWidth = vah - val;
+    const nearestLvn = lvns
       .map((l) => ({ ...l, dist: Math.abs(currentPrice - l.priceLevel) }))
       .sort((a, b) => a.dist - b.dist)[0];
-    const within = nearest.dist <= binSize * 2;
-    if (within) {
-      if (currentPrice > vah && lastCandle.isUp && tickDelta > 0) {
-        const e = currentPrice;
-        const tp = e + (e - vah) * 1.5;
-        const sl = nearest.priceLevel - requiredRange;
-        const rr = sl < e ? (tp - e) / (e - sl) : 0;
-        if (rr >= 1.5) {
-          signal = "BUY";
-          signalModel = "ABSORPTION_LONG";
-          reasoning = `Expansion long: price reclaiming LVN @ ${nearest.priceLevel.toFixed(5)} above VAH.`;
-          entryPrice = e;
-          targetPrice = tp;
-          stopLoss = sl;
-        } else {
-          reasoning = `LVN reclaim long but RR ${rr.toFixed(2)} < 1.5 — skipping.`;
-        }
-      } else if (currentPrice < val && !lastCandle.isUp && tickDelta < 0) {
-        const e = currentPrice;
-        // Note: previous formula `(val - currentPrice) * 1.5` was wrong below VAL
-        // (currentPrice < val so val - currentPrice > 0, but TP needs (vah - e)
-        // style symmetry). Mirror the long: distance to VAL × 1.5.
-        const tp = e - (val - e) * 1.5;
-        const sl = nearest.priceLevel + requiredRange;
-        const rr = sl > e ? (e - tp) / (sl - e) : 0;
-        if (rr >= 1.5) {
-          signal = "SELL";
-          signalModel = "ABSORPTION_SHORT";
-          reasoning = `Expansion short: price rejecting LVN @ ${nearest.priceLevel.toFixed(5)} below VAL.`;
-          entryPrice = e;
-          targetPrice = tp;
-          stopLoss = sl;
-        } else {
-          reasoning = `LVN rejection short but RR ${rr.toFixed(2)} < 1.5 — skipping.`;
-        }
+    if (vaWidth > 0 && currentPrice > vah && lastCandle.isUp && tickDelta > 0) {
+      const e = currentPrice;
+      const sl = vah - Math.max(requiredRange, vaWidth * 0.1);
+      const tp = e + vaWidth;
+      const rr = (tp - e) / (e - sl);
+      if (rr >= 1.5) {
+        signal = "BUY";
+        signalModel = "ABSORPTION_LONG";
+        reasoning = `Expansion long: price broke above VAH (${vah.toFixed(5)}) with positive delta; LVN @ ${nearestLvn.priceLevel.toFixed(5)} acted as ignition. Stop below VAH, target +1 VA width.`;
+        entryPrice = e;
+        targetPrice = tp;
+        stopLoss = sl;
+      } else {
+        reasoning = `VAH break long but RR ${rr.toFixed(2)} < 1.5 — entry too extended.`;
+      }
+    } else if (vaWidth > 0 && currentPrice < val && !lastCandle.isUp && tickDelta < 0) {
+      const e = currentPrice;
+      const sl = val + Math.max(requiredRange, vaWidth * 0.1);
+      const tp = e - vaWidth;
+      const rr = (e - tp) / (sl - e);
+      if (rr >= 1.5) {
+        signal = "SELL";
+        signalModel = "ABSORPTION_SHORT";
+        reasoning = `Expansion short: price broke below VAL (${val.toFixed(5)}) with negative delta; LVN @ ${nearestLvn.priceLevel.toFixed(5)} acted as ignition. Stop above VAL, target −1 VA width.`;
+        entryPrice = e;
+        targetPrice = tp;
+        stopLoss = sl;
+      } else {
+        reasoning = `VAL break short but RR ${rr.toFixed(2)} < 1.5 — entry too extended.`;
       }
     }
   }

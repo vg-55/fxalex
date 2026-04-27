@@ -6,6 +6,7 @@ import {
   isMetaApiConfigured,
   createAccount as metaCreate,
   deployAccount as metaDeploy,
+  deleteAccount as metaDelete,
   getAccount as metaGet,
 } from "@/lib/mt5/metaapi";
 import { toPublic, validateCreate } from "@/lib/mt5/types";
@@ -89,29 +90,50 @@ export async function POST(req: Request) {
   }
 
   // Encrypt the password for our records (used for re-provision / re-deploy).
-  const passwordEnc = encryptSecret(input.password);
+  // If anything below this point fails (encryption, DB insert), we tear the
+  // MetaApi account down so we don't leak orphan provisioned accounts.
+  let row: typeof schema.mt5Accounts.$inferSelect | undefined;
+  try {
+    const passwordEnc = encryptSecret(input.password);
 
-  const [row] = await db
-    .insert(schema.mt5Accounts)
-    .values({
-      label: input.label,
-      broker: input.broker ?? null,
-      server: input.server,
-      login: input.login,
-      passwordEnc,
-      metaapiAccountId,
-      metaapiRegion: input.region ?? "new-york",
-      metaapiState: "DEPLOYING",
-      mode: "OFF", // safe default; user must opt-in
-      strategies: input.strategies ?? ["COMBINED"],
-      symbols: input.symbols ?? null,
-      riskPctPerTrade: input.riskPctPerTrade ?? 0.5,
-      maxConcurrent: input.maxConcurrent ?? 3,
-      maxDailyLossPct: input.maxDailyLossPct ?? 3,
-      maxLot: input.maxLot ?? 1,
-      minRR: input.minRR ?? 1.5,
-    })
-    .returning();
+    const inserted = await db
+      .insert(schema.mt5Accounts)
+      .values({
+        label: input.label,
+        broker: input.broker ?? null,
+        server: input.server,
+        login: input.login,
+        passwordEnc,
+        metaapiAccountId,
+        metaapiRegion: input.region ?? "new-york",
+        metaapiState: "DEPLOYING",
+        mode: "OFF", // safe default; user must opt-in
+        strategies: input.strategies ?? ["COMBINED"],
+        symbols: input.symbols ?? null,
+        riskPctPerTrade: input.riskPctPerTrade ?? 0.5,
+        maxConcurrent: input.maxConcurrent ?? 3,
+        maxDailyLossPct: input.maxDailyLossPct ?? 3,
+        maxLot: input.maxLot ?? 1,
+        minRR: input.minRR ?? 1.5,
+      })
+      .returning();
+    row = inserted[0];
+  } catch (err) {
+    // Roll back the MetaApi-side provisioning so the user can retry without
+    // colliding on (server, login). Best-effort — log if rollback fails too.
+    metaDelete(metaapiAccountId).catch((e) =>
+      console.error("[live/accounts] orphan MetaApi account, manual cleanup needed:", metaapiAccountId, e)
+    );
+    const message = err instanceof Error ? err.message : "db insert error";
+    return NextResponse.json(
+      { error: `local persistence failed (MetaApi rolled back): ${message}` },
+      { status: 500 }
+    );
+  }
+  if (!row) {
+    metaDelete(metaapiAccountId).catch(() => undefined);
+    return NextResponse.json({ error: "db insert returned no row" }, { status: 500 });
+  }
 
   await db.insert(schema.mt5Audit).values({
     accountId: row.id,

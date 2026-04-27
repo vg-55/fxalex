@@ -171,6 +171,17 @@ const SEED: Seed[] = [
     slBufferPct: 0.25,
     enabled: true,
   },
+  {
+    pair: "NZDUSD",
+    tvSymbol: "OANDA:NZDUSD",
+    timeframe: "1H",
+    aoiLow: 0.5900,
+    aoiHigh: 0.6000,
+    ma50: 0.5950,
+    decimals: 5,
+    slBufferPct: 0.25,
+    enabled: true,
+  },
 ];
 
 export async function seedInstruments() {

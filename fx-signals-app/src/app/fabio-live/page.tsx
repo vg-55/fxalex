@@ -73,7 +73,7 @@ type OrderRow = {
   closedAt: string | null;
 };
 
-const FABIO_PAIRS = ["EURUSD", "GBPUSD", "USDJPY", "XAUUSD"] as const;
+const FABIO_PAIRS = ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "USDCAD", "AUDUSD", "NZDUSD", "XAUUSD"] as const;
 
 // ---------------------------------------------------------------------------
 

@@ -216,7 +216,7 @@ function FabioCard({ pair }: { pair: string }) {
 }
 
 export default function FabioPage() {
-  const pairs = ["XAUUSD", "EURUSD", "GBPUSD", "USDJPY", "USDCAD", "AUDUSD"];
+  const pairs = ["XAUUSD", "EURUSD", "GBPUSD", "USDJPY", "USDCHF", "USDCAD", "AUDUSD", "NZDUSD"];
 
   return (
     <div className="p-6 max-w-7xl mx-auto space-y-6">

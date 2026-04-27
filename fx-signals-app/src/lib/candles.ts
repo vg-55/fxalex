@@ -6,7 +6,7 @@ export type CandlePair =
   | "XAUUSD" | "EURUSD" | "GBPUSD"
   | "GBPNZD" | "EURJPY" | "CADJPY"
   | "AUDCAD" | "GBPAUD" | "EURAUD"
-  | "USDCAD" | "USDCHF" | "NZDCAD" | "GBPCHF" | "USDJPY" | "AUDUSD";
+  | "USDCAD" | "USDCHF" | "NZDCAD" | "GBPCHF" | "USDJPY" | "AUDUSD" | "NZDUSD";
 
 const YAHOO_SYMBOL: Record<CandlePair, string> = {
   // `XAUUSD=X` is delisted on Yahoo (404). `GC=F` is COMEX front-month gold
@@ -26,6 +26,7 @@ const YAHOO_SYMBOL: Record<CandlePair, string> = {
   GBPCHF: "GBPCHF=X",
   USDJPY: "USDJPY=X",
   AUDUSD: "AUDUSD=X",
+  NZDUSD: "NZDUSD=X",
 };
 
 const TD_SYMBOL: Record<CandlePair, string> = {
@@ -44,11 +45,12 @@ const TD_SYMBOL: Record<CandlePair, string> = {
   GBPCHF: "GBP/CHF",
   USDJPY: "USD/JPY",
   AUDUSD: "AUD/USD",
+  NZDUSD: "NZD/USD",
 };
 
 // IBR Live covers these FX pairs for historical aggregate data
 const IBR_SYMBOL: Partial<Record<CandlePair, string>> = {
-  EURUSD: "EURUSD", GBPUSD: "GBPUSD", USDJPY: "USDJPY", AUDUSD: "AUDUSD", USDCAD: "USDCAD"
+  EURUSD: "EURUSD", GBPUSD: "GBPUSD", USDJPY: "USDJPY", AUDUSD: "AUDUSD", USDCAD: "USDCAD", NZDUSD: "NZDUSD"
 };
 
 const IBR_BASE = "https://api.ibrlive.com/api";
